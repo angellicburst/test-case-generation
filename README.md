@@ -98,7 +98,6 @@ python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>"
 - Markdown 当前格式要求：`- [ ]` 任务项、`> 用例数量: 用例 N 条` 数量声明、用例类型仅 `正向` / `反向`、不得使用 `- [x]` 或 `####` 旧式标题。详见 [Markdown 规范](references/markdown-format.md)。
 - Excel 要求：`测试用例` 与 `生成说明` 两个工作表、11 个标准列头、优先级 `P0`–`P4`、用例 ID 与标题唯一。详见 [Excel 规范](references/excel-format.md)。
 - 需求存在未定义细节时，执行者会生成《需求存疑与待确认清单》；确认后反向优化用例并删除清单（Markdown 删章节，Excel 清空 `生成说明` 对应字段）。
-- 只接受 `> 用例数量: 用例 N 条` 的数量声明；`description: 用例 N 条` 等历史写法不再被接受，历史文件需要先改为当前格式，或按当前需求重新生成。
 
 ## 常见问题
 
