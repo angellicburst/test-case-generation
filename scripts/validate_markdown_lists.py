@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 FIELD_PATTERN = re.compile(r"^(\s*)- (前置条件|测试步骤|预期结果)\s*$")
@@ -25,17 +26,14 @@ EXPECTED_RESULT_PATTERN = re.compile(r"^\s*-\s*预期结果\s*$")
 def validate(text: str) -> list[str]:
     lines = [line.expandtabs(4) for line in text.splitlines()]
     errors: list[str] = []
-    case_titles: list[tuple[int, str]] = []
+    cases: list[tuple[int, str, int]] = []
     declared_count: int | None = None
-    expected_result_count = 0
     node_stack: list[int] = []
 
     for index, line in enumerate(lines):
         description = DESCRIPTION_PATTERN.match(line)
         if description:
             declared_count = int(description.group(1))
-        if EXPECTED_RESULT_PATTERN.match(line):
-            expected_result_count += 1
         case_item = CASE_ITEM_PATTERN.match(line)
         if case_item and case_item.group(1) not in ("正向", "反向"):
             errors.append(
@@ -61,7 +59,7 @@ def validate(text: str) -> list[str]:
             node_stack.pop()
         checkbox_case = CHECKBOX_CASE_PATTERN.match(line)
         if checkbox_case and not CASE_WITH_ID_PATTERN.match(line):
-            case_titles.append((index + 1, checkbox_case.group(2).strip()))
+            cases.append((index, checkbox_case.group(2).strip(), indent))
             if len(node_stack) < 2:
                 errors.append(
                     f"第 {index + 1} 行的用例必须位于功能模块和测试类型的列表项下（至少两级缩进）。"
@@ -69,17 +67,37 @@ def validate(text: str) -> list[str]:
         node_stack.append(indent)
 
     seen_titles: set[str] = set()
-    for line_number, case_title in case_titles:
+    for index, case_title, _ in cases:
+        line_number = index + 1
         if case_title in seen_titles:
             errors.append(f"第 {line_number} 行的用例标题“{case_title}”重复。")
         seen_titles.add(case_title)
 
+    if not cases:
+        errors.append("文档中未包含任何有效用例任务项。")
     if declared_count is None:
         errors.append("文档顶部缺少用例数量声明（`> 用例数量: 用例 N 条`）。")
-    elif declared_count != expected_result_count:
+    elif declared_count != len(cases):
         errors.append(
-            f"文档声明用例数量为 {declared_count}，实际“预期结果”数量为 {expected_result_count}。"
+            f"文档声明用例数量为 {declared_count}，实际用例任务项数量为 {len(cases)}。"
         )
+
+    for case_position, (case_index, _, case_indent) in enumerate(cases):
+        case_end = cases[case_position + 1][0] if case_position + 1 < len(cases) else len(lines)
+        field_names: list[str] = []
+        for line in lines[case_index + 1:case_end]:
+            node = NODE_PATTERN.match(line)
+            if node and len(node.group(1)) <= case_indent:
+                break
+            field = FIELD_PATTERN.match(line)
+            if field and len(field.group(1)) == case_indent + 2:
+                field_names.append(field.group(2))
+        field_counts = Counter(field_names)
+        for field in ("前置条件", "测试步骤", "预期结果"):
+            if field_counts[field] == 0:
+                errors.append(f"第 {case_index + 1} 行的用例缺少必填字段“{field}”。")
+            elif field_counts[field] > 1:
+                errors.append(f"第 {case_index + 1} 行的用例包含重复的“{field}”字段。")
 
     for index, line in enumerate(lines):
         match = FIELD_PATTERN.match(line)

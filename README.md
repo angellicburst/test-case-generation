@@ -76,6 +76,7 @@ Excel 生成与校验：
 python "{本目录}/scripts/create_excel_cases.py" --output "<输出文件.xlsx>" --input-json "<cases.json>"
 
 python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>"
+python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" --sheet-name "<自定义工作表名称>"
 ```
 
 `create_excel_cases.py` 的 JSON 结构（`meta` 字段、数组字段写法、`sheet_name` 覆盖等）见 [Excel 规范](references/excel-format.md#生成脚本推荐)。
