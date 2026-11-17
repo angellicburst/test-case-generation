@@ -11,6 +11,9 @@ from pathlib import Path
 
 FIELD_PATTERN = re.compile(r"^(\s*)- (前置条件|测试步骤|预期结果)\s*$")
 TRACEABILITY_PATTERN = re.compile(r"^(\s*)>\s*(\S.*)$")
+TRACEABILITY_CONTENT_PATTERN = re.compile(
+    r"^\[需求追溯\]\s+来源：(.+?)｜定位：(.+?)｜规则：(.+?)$"
+)
 CHILD_PATTERN = re.compile(r"^(\s{2,})(?:(-)|(\d+)\.)\s+.+$")
 LEGACY_CASE_PATTERN = re.compile(r"^####\s+.+-P[0-4]\s*$")
 CHECKBOX_CASE_PATTERN = re.compile(r"^\s*- \[ \] (正向|反向)-(.+)-P[0-4]\s*$")
@@ -107,6 +110,11 @@ def validate(text: str) -> list[str]:
                 traceability_count += 1
                 if content_index != first_content_index:
                     errors.append(f"第 {case_index + 1} 行的用例必须在标题下首个非空行填写需求追溯。")
+                traceability_content = TRACEABILITY_CONTENT_PATTERN.match(traceability.group(2).strip())
+                if not traceability_content or not all(part.strip() for part in traceability_content.groups()):
+                    errors.append(
+                        f"第 {content_index + 1} 行的需求追溯必须填写“来源、定位、规则”，不得仅使用内部编号。"
+                    )
         field_counts = Counter(field_names)
         if traceability_count == 0:
             errors.append(f"第 {case_index + 1} 行的用例标题下缺少需求追溯引用。")

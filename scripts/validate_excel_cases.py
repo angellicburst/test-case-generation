@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -22,7 +23,6 @@ EXPECTED_HEADERS = [
 ]
 
 MANDATORY_FIELDS = [
-    "需求/追踪 ID",
     "用例 ID",
     "用例标题",
     "用例类型",
@@ -35,6 +35,7 @@ MANDATORY_FIELDS = [
 ]
 
 ALLOWED_PRIORITIES = {"P0", "P1", "P2", "P3", "P4"}
+TRACEABILITY_PATTERN = re.compile(r"^\[需求追溯\]\s+来源：(.+?)｜定位：(.+?)｜规则：(.+?)$")
 
 
 def validate_excel_file(file_path: Path, sheet_name: str = "测试用例") -> list[str]:
@@ -101,8 +102,11 @@ def validate_excel_file(file_path: Path, sheet_name: str = "测试用例") -> li
 
         notes_val = ws.cell(row=row_idx, column=header_to_col["备注"]).value
         notes = str(notes_val).strip() if notes_val is not None else ""
-        if not notes.startswith("追溯：") or not notes.removeprefix("追溯：").splitlines()[0].strip():
-            errors.append(f"第 {row_idx} 行备注首行必须为'追溯：<需求来源>'，且需求来源不能为空。")
+        traceability = TRACEABILITY_PATTERN.match(notes.splitlines()[0] if notes else "")
+        if not traceability or not all(part.strip() for part in traceability.groups()):
+            errors.append(
+                f"第 {row_idx} 行备注首行必须为“[需求追溯] 来源：<材料>｜定位：<位置>｜规则：<规则>”，不得仅使用内部编号。"
+            )
 
         # 检查用例 ID
         case_id_val = ws.cell(row=row_idx, column=header_to_col["用例 ID"]).value

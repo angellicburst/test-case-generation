@@ -50,11 +50,13 @@ def normalize_multiline(value: Any) -> str:
 
 
 def build_notes(case: dict[str, Any]) -> str:
-    traceability = str(case.get("traceability") or case.get("requirement_id") or case.get("trace_id") or "").strip()
+    traceability = str(case.get("traceability") or "").strip()
     notes = normalize_multiline(case.get("notes", case.get("remark", ""))).strip()
-    if notes.startswith("追溯："):
+    if not traceability and notes.startswith("[需求追溯]"):
         return notes
-    trace_line = f"追溯：{traceability}" if traceability else ""
+    traceability = traceability.removeprefix("[需求追溯]").strip()
+    traceability = traceability.removeprefix("追溯：").strip()
+    trace_line = f"[需求追溯] {traceability}" if traceability else ""
     return "\n".join(part for part in (trace_line, notes) if part)
 
 

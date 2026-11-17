@@ -23,7 +23,7 @@ VALID_MARKDOWN = """# 测试用例 - 2026-11-17 - [注册]
 - [ ] 注册模块
   - [ ] 功能测试
     - [ ] 正向-提交合法注册-P0
-      > REQ-1｜需求文档 2.1：手机号规则
+      > [需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字
       - 前置条件
         - 用户未注册。
       - 测试步骤
@@ -35,7 +35,7 @@ VALID_MARKDOWN = """# 测试用例 - 2026-11-17 - [注册]
 
 def excel_case(**overrides):
     case = {
-        "requirement_id": "REQ-1",
+        "requirement_id": "",
         "id": "TC-REG-001",
         "title": "提交合法注册",
         "type": "功能测试",
@@ -45,6 +45,7 @@ def excel_case(**overrides):
         "test_data": "<独立测试账号>",
         "steps": "提交注册",
         "expected_results": "注册成功",
+        "traceability": "来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字",
         "notes": "无",
     }
     case.update(overrides)
@@ -60,7 +61,10 @@ class MarkdownValidationTests(unittest.TestCase):
         self.assertTrue(any("未包含任何有效用例任务项" in error for error in errors))
 
     def test_missing_required_fields_rejected(self):
-        text = VALID_MARKDOWN.replace("      > REQ-1｜需求文档 2.1：手机号规则\n", "")
+        text = VALID_MARKDOWN.replace(
+            "      > [需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字\n",
+            "",
+        )
         errors = validate(text)
         self.assertTrue(any("标题下缺少需求追溯引用" in error for error in errors))
         text = VALID_MARKDOWN.replace("      - 前置条件\n        - 用户未注册。\n", "")
@@ -83,12 +87,26 @@ class MarkdownValidationTests(unittest.TestCase):
         )
         self.assertEqual(validate(with_blank_line), [])
         misplaced = VALID_MARKDOWN.replace(
-            "      > REQ-1｜需求文档 2.1：手机号规则\n",
-            "      - 前置条件\n        - 用户未注册。\n      > REQ-1｜需求文档 2.1：手机号规则\n",
+            "      > [需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字\n",
+            "      - 前置条件\n        - 用户未注册。\n      > [需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字\n",
         )
         self.assertTrue(any("标题下首个非空行填写需求追溯" in error for error in validate(misplaced)))
-        empty = VALID_MARKDOWN.replace("      > REQ-1｜需求文档 2.1：手机号规则\n", "      >    \n")
+        empty = VALID_MARKDOWN.replace(
+            "      > [需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字\n",
+            "      >    \n",
+        )
         self.assertTrue(any("标题下缺少需求追溯引用" in error for error in validate(empty)))
+
+    def test_traceability_requires_source_location_and_rule(self):
+        text = VALID_MARKDOWN.replace(
+            "[需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字",
+            "[需求追溯] REQ-001",
+        )
+        self.assertTrue(any("不得仅使用内部编号" in error for error in validate(text)))
+        legacy = VALID_MARKDOWN.replace("[需求追溯] 来源：", "需求追溯：来源：")
+        self.assertTrue(any("需求追溯必须填写" in error for error in validate(legacy)))
+        missing_space = VALID_MARKDOWN.replace("[需求追溯] 来源：", "[需求追溯]来源：")
+        self.assertTrue(any("需求追溯必须填写" in error for error in validate(missing_space)))
 
     def test_count_uses_case_items(self):
         text = VALID_MARKDOWN.replace("用例 1 条", "用例 2 条")
@@ -142,13 +160,57 @@ class ExcelTests(unittest.TestCase):
             workbook = load_workbook(target)
             self.assertEqual(workbook.sheetnames, ["测试用例", "生成说明"])
             self.assertEqual(workbook["生成说明"]["B4"].value, "1")
-            self.assertEqual(workbook["测试用例"]["K3"].value, "追溯：REQ-1\n无")
+            self.assertEqual(
+                workbook["测试用例"]["K3"].value,
+                "[需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字\n无",
+            )
+            self.assertIsNone(workbook["测试用例"]["A3"].value)
 
     def test_excel_traceability_uses_explicit_source_and_preserves_notes(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "traceability.xlsx"
-            build_workbook("测试用例", [excel_case(traceability="REQ-1｜需求文档 2.1：手机号规则", notes="补充备注")]).save(target)
-            self.assertEqual(load_workbook(target)["测试用例"]["K3"].value, "追溯：REQ-1｜需求文档 2.1：手机号规则\n补充备注")
+            build_workbook(
+                "测试用例",
+                [
+                    excel_case(
+                        traceability="来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字",
+                        notes="补充备注",
+                    )
+                ],
+            ).save(target)
+            self.assertEqual(
+                load_workbook(target)["测试用例"]["K3"].value,
+                "[需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字\n补充备注",
+            )
+
+    def test_excel_requirement_id_does_not_replace_traceability(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "missing-traceability.xlsx"
+            build_workbook(
+                "测试用例",
+                [excel_case(requirement_id="REQ-1", traceability="", notes="普通备注")],
+            ).save(target)
+            errors = validate_excel_file(target)
+            self.assertTrue(any("不得仅使用内部编号" in error for error in errors))
+
+    def test_excel_requirement_id_is_optional_and_accepts_material_trace_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "blank-requirement-id.xlsx"
+            case = excel_case(trace_id="US-1024")
+            case.pop("requirement_id")
+            build_workbook("测试用例", [case]).save(target)
+            self.assertEqual(validate_excel_file(target), [])
+            self.assertEqual(load_workbook(target)["测试用例"]["A3"].value, "US-1024")
+
+    def test_excel_traceability_requires_exact_label(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "legacy-label.xlsx"
+            build_workbook("测试用例", [excel_case()]).save(target)
+            workbook = load_workbook(target)
+            workbook["测试用例"]["K3"] = "追溯：来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字"
+            workbook.save(target)
+            errors = validate_excel_file(target)
+            self.assertTrue(any("[需求追溯] 来源：" in error for error in errors))
 
     def test_custom_sheet_validates_with_same_name(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -181,14 +243,15 @@ class ExcelTests(unittest.TestCase):
             ]
             build_workbook("测试用例", cases).save(target)
             workbook = load_workbook(target)
-            workbook["测试用例"]["K3"] = "无追溯备注"
+            workbook["测试用例"]["K3"] = "[需求追溯] REQ-001"
             workbook.save(target)
             errors = validate_excel_file(target)
-            self.assertTrue(any("备注首行必须为'追溯：<需求来源>'" in error for error in errors))
+            self.assertTrue(any("不得仅使用内部编号" in error for error in errors))
             self.assertTrue(any("缺少必填字段: '前置条件'" in error for error in errors))
             self.assertTrue(any("用例 ID 重复" in error for error in errors))
             self.assertTrue(any("用例标题重复" in error for error in errors))
             self.assertTrue(any("优先级无效" in error for error in errors))
+            self.assertFalse(any("需求/追踪 ID" in error for error in errors))
 
     def test_excel_cli_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
