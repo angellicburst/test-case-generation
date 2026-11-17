@@ -8,7 +8,7 @@
 
 - 已提供需求材料，需要拆分功能点并生成可执行、可验证、可追溯的测试用例。
 - 需要输出 Markdown 或 Excel（`.xlsx`）格式的用例文件。
-- 同一次需求需要同时输出多种格式（每种格式分别从原始材料重新设计，不互相转换）。
+- 同一次需求需要同时输出多种格式（共享需求事实与覆盖口径，各格式独立设计）。
 
 不适用于：
 
@@ -45,6 +45,8 @@ test-case-generation/
 │   ├── create_excel_cases.py   # 按 JSON 生成 Excel 工作簿
 │   ├── validate_markdown_lists.py
 │   └── validate_excel_cases.py
+├── tests/
+│   └── test_scripts.py         # 脚本自动回归测试
 └── evals/
     └── evals.json              # 回归评测用例
 ```
@@ -122,4 +124,12 @@ python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" --sheet-nam
 
 - `SKILL.md` 负责流程，`references/` 负责规则与格式，`scripts/` 负责执行；修改规则时同步检查这三处，避免同一规则多处重复。
 - 修改脚本或格式后，至少验证一份当前格式 Markdown 用例、Excel 模板、脚本生成的 Excel 样例，并跑一遍 `evals/evals.json` 中的回归场景。
-- README 只维护导航、上手和常见问题；具体规则变更以 `SKILL.md` 和 `references/` 为准。
+- README 只维护导航、上手和常见问题。
+
+### 自动回归测试
+
+```bash
+python -m unittest discover -s "{本目录}/tests" -v
+```
+
+测试覆盖 Markdown 与 Excel 的正反向校验、自定义工作表、纯文本写入及命令行调用。`evals/evals.json` 中的需求生成与平台策略场景仍需执行对应代理任务并人工复核业务语义，不能用脚本测试代替。
