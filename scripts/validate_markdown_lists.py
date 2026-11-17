@@ -10,6 +10,7 @@ from collections import Counter
 from pathlib import Path
 
 FIELD_PATTERN = re.compile(r"^(\s*)- (前置条件|测试步骤|预期结果)\s*$")
+TRACEABILITY_PATTERN = re.compile(r"^(\s*)>\s*(\S.*)$")
 CHILD_PATTERN = re.compile(r"^(\s{2,})(?:(-)|(\d+)\.)\s+.+$")
 LEGACY_CASE_PATTERN = re.compile(r"^####\s+.+-P[0-4]\s*$")
 CHECKBOX_CASE_PATTERN = re.compile(r"^\s*- \[ \] (正向|反向)-(.+)-P[0-4]\s*$")
@@ -85,14 +86,32 @@ def validate(text: str) -> list[str]:
     for case_position, (case_index, _, case_indent) in enumerate(cases):
         case_end = cases[case_position + 1][0] if case_position + 1 < len(cases) else len(lines)
         field_names: list[str] = []
-        for line in lines[case_index + 1:case_end]:
+        traceability_count = 0
+        first_content_index = next(
+            (
+                content_index
+                for content_index, content_line in enumerate(lines[case_index + 1:case_end], start=case_index + 1)
+                if content_line.strip()
+            ),
+            None,
+        )
+        for content_index, line in enumerate(lines[case_index + 1:case_end], start=case_index + 1):
             node = NODE_PATTERN.match(line)
             if node and len(node.group(1)) <= case_indent:
                 break
             field = FIELD_PATTERN.match(line)
             if field and len(field.group(1)) == case_indent + 2:
                 field_names.append(field.group(2))
+            traceability = TRACEABILITY_PATTERN.match(line)
+            if traceability and len(traceability.group(1)) == case_indent + 2:
+                traceability_count += 1
+                if content_index != first_content_index:
+                    errors.append(f"第 {case_index + 1} 行的用例必须在标题下首个非空行填写需求追溯。")
         field_counts = Counter(field_names)
+        if traceability_count == 0:
+            errors.append(f"第 {case_index + 1} 行的用例标题下缺少需求追溯引用。")
+        elif traceability_count > 1:
+            errors.append(f"第 {case_index + 1} 行的用例包含重复的需求追溯引用。")
         for field in ("前置条件", "测试步骤", "预期结果"):
             if field_counts[field] == 0:
                 errors.append(f"第 {case_index + 1} 行的用例缺少必填字段“{field}”。")

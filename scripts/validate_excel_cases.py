@@ -31,6 +31,7 @@ MANDATORY_FIELDS = [
     "前置条件",
     "执行步骤",
     "预期结果",
+    "备注",
 ]
 
 ALLOWED_PRIORITIES = {"P0", "P1", "P2", "P3", "P4"}
@@ -97,6 +98,11 @@ def validate_excel_file(file_path: Path, sheet_name: str = "测试用例") -> li
             val = ws.cell(row=row_idx, column=col_idx).value
             if val is None or not str(val).strip():
                 errors.append(f"第 {row_idx} 行缺少必填字段: '{field}'。")
+
+        notes_val = ws.cell(row=row_idx, column=header_to_col["备注"]).value
+        notes = str(notes_val).strip() if notes_val is not None else ""
+        if not notes.startswith("追溯：") or not notes.removeprefix("追溯：").splitlines()[0].strip():
+            errors.append(f"第 {row_idx} 行备注首行必须为'追溯：<需求来源>'，且需求来源不能为空。")
 
         # 检查用例 ID
         case_id_val = ws.cell(row=row_idx, column=header_to_col["用例 ID"]).value

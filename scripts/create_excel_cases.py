@@ -49,6 +49,15 @@ def normalize_multiline(value: Any) -> str:
     return str(value)
 
 
+def build_notes(case: dict[str, Any]) -> str:
+    traceability = str(case.get("traceability") or case.get("requirement_id") or case.get("trace_id") or "").strip()
+    notes = normalize_multiline(case.get("notes", case.get("remark", ""))).strip()
+    if notes.startswith("追溯："):
+        return notes
+    trace_line = f"追溯：{traceability}" if traceability else ""
+    return "\n".join(part for part in (trace_line, notes) if part)
+
+
 def estimate_row_height(values: list[Any]) -> int:
     longest = max((len(str(value or "")) for value in values), default=0)
     line_breaks = sum(str(value or "").count("\n") for value in values)
@@ -133,7 +142,7 @@ def build_case_sheet(workbook: Any, title: str, cases: list[dict[str, Any]], she
             normalize_multiline(case.get("test_data", "")),
             normalize_multiline(case.get("steps", case.get("step_description", ""))),
             normalize_multiline(case.get("expected_results", case.get("expected_result", ""))),
-            normalize_multiline(case.get("notes", case.get("remark", ""))),
+            build_notes(case),
         ]
         for col_index, value in enumerate(values, start=1):
             cell = ws.cell(row=row_index, column=col_index, value=as_excel_text(value))

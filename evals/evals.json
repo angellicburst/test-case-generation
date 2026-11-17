@@ -156,6 +156,17 @@
         "识别手机号位数和验证码有效期两处错误。",
         "要求修正用例并重新执行格式校验。"
       ]
+    },
+    {
+      "id": "requirement-traceability-in-both-formats",
+      "prompt": "根据需求 REQ-001 的 2.1 节生成 Markdown 和 Excel 用例。",
+      "expected_output": "Markdown 每条用例标题下首先填写追溯字段；Excel 每条用例备注首行填写追溯需求来源，两种格式均通过校验。",
+      "files": [],
+      "expectations": [
+        "Markdown 追溯字段位于用例标题下首位，包含 REQ-001 及 2.1 节。",
+        "Excel 备注首行包含追溯及对应需求来源，其他备注不被覆盖。",
+        "缺少追溯字段或追溯内容为空时校验失败。"
+      ]
     }
   ]
 }
