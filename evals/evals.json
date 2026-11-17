@@ -71,6 +71,80 @@
         "Markdown 与 Excel 分别遵循自己的字段、用例拆分和输出规范。",
         "两个格式产物分别通过各自指定的校验脚本后交付。"
       ]
+    },
+    {
+      "id": "markdown-empty-document-rejected",
+      "prompt": "使用 scripts/validate_markdown_lists.py 校验一份包含标题和“用例数量: 用例 0 条”声明、但没有任何用例任务项的 Markdown 文件。",
+      "expected_output": "校验失败，明确指出文档没有有效用例任务项。",
+      "files": [],
+      "expectations": [
+        "校验返回失败。",
+        "错误信息指出文档未包含任何有效用例任务项。"
+      ]
+    },
+    {
+      "id": "markdown-required-fields-and-count",
+      "prompt": "使用 scripts/validate_markdown_lists.py 分别校验缺少前置条件、重复预期结果、用例数量声明与真实任务项数量不一致的 Markdown 文件。",
+      "expected_output": "三种文件均校验失败，分别指出缺失字段、重复字段和数量不一致。",
+      "files": [],
+      "expectations": [
+        "缺少前置条件的文件校验失败并定位对应字段。",
+        "重复预期结果的文件校验失败并定位对应字段。",
+        "数量不一致的文件校验失败，数量按真实用例任务项计算。"
+      ]
+    },
+    {
+      "id": "excel-custom-sheet-validation",
+      "prompt": "使用 scripts/create_excel_cases.py 和 meta.sheet_name=自定义生成 Excel 用例，再使用 scripts/validate_excel_cases.py --sheet-name 自定义 校验。",
+      "expected_output": "生成和校验使用相同的主工作表名称，工作簿校验通过。",
+      "files": [],
+      "expectations": [
+        "主工作表名称为自定义。",
+        "使用 --sheet-name 自定义 的校验命令返回通过。"
+      ]
+    },
+    {
+      "id": "excel-formula-injection-prevention",
+      "prompt": "使用 scripts/create_excel_cases.py 生成 Excel 用例，各用例字段分别包含以 =、+、-、@ 开头的文本，重新加载工作簿检查单元格。",
+      "expected_output": "这些字段均按纯文本保存，不被识别为公式，正常文本保持不变。",
+      "files": [],
+      "expectations": [
+        "以 =、+、-、@ 开头的字段不是公式单元格。",
+        "Excel 显示内容保留原始文本。",
+        "正常文本不包含多余的前导单引号。"
+      ]
+    },
+    {
+      "id": "existing-output-overwrite-confirmation",
+      "prompt": "生成 Markdown 用例时，目标路径已有同名同格式文件。",
+      "expected_output": "不读取旧用例内容，写入前明确告知覆盖风险并征得用户确认；未确认时不写入。",
+      "files": [],
+      "expectations": [
+        "写入前请求覆盖确认。",
+        "未确认时保留原文件不变。"
+      ]
+    },
+    {
+      "id": "multi-format-serial-fallback",
+      "prompt": "同一需求要求生成 Markdown 和 Excel，但当前平台没有可调用的子代理或并行任务工具。",
+      "expected_output": "说明无法并行的原因，主代理串行生成两种格式，复用统一需求事实、覆盖矩阵和待确认项，分别校验。",
+      "files": [],
+      "expectations": [
+        "明确说明因无并行工具而串行执行。",
+        "串行执行不重复分析原始材料。",
+        "两种格式分别生成并按可用能力校验。"
+      ]
+    },
+    {
+      "id": "missing-validator-unvalidated-delivery",
+      "prompt": "生成 Markdown 用例时，技能目录中的 scripts/validate_markdown_lists.py 不存在。",
+      "expected_output": "按 SKILL.md 第 4 步告知缺失脚本及影响，经用户选择后跳过校验继续生成，并在交付中标注未校验。",
+      "files": [],
+      "expectations": [
+        "明确报告缺失的校验脚本路径。",
+        "不宣称产物已经校验通过。",
+        "按用户选择继续时标注未校验。"
+      ]
     }
   ]
 }

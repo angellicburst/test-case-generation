@@ -37,6 +37,10 @@ DEFAULT_COLUMN_WIDTHS = {
 }
 
 
+def as_excel_text(value: Any) -> str:
+    return str(value) if value is not None else ""
+
+
 def normalize_multiline(value: Any) -> str:
     if value is None:
         return ""
@@ -77,7 +81,8 @@ def build_info_sheet(workbook: Any, meta: dict[str, Any]) -> None:
 
     for row_index, (label, value) in enumerate(rows, start=2):
         label_cell = sheet.cell(row=row_index, column=1, value=label)
-        value_cell = sheet.cell(row=row_index, column=2, value=value)
+        value_cell = sheet.cell(row=row_index, column=2, value=as_excel_text(value))
+        value_cell.data_type = "s"
         label_cell.font = Font(name="Microsoft YaHei", bold=True, size=10)
         value_cell.font = Font(name="Microsoft YaHei", size=10)
         label_cell.fill = label_fill
@@ -97,7 +102,8 @@ def build_case_sheet(workbook: Any, title: str, cases: list[dict[str, Any]], she
     ws = workbook.active
     ws.title = sheet_name
 
-    ws["A1"] = title
+    ws["A1"] = as_excel_text(title)
+    ws["A1"].data_type = "s"
     ws.merge_cells("A1:K1")
     ws["A1"].font = Font(name="Microsoft YaHei", bold=True, size=16)
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
@@ -130,8 +136,9 @@ def build_case_sheet(workbook: Any, title: str, cases: list[dict[str, Any]], she
             normalize_multiline(case.get("notes", case.get("remark", ""))),
         ]
         for col_index, value in enumerate(values, start=1):
-            cell = ws.cell(row=row_index, column=col_index, value=value)
+            cell = ws.cell(row=row_index, column=col_index, value=as_excel_text(value))
             cell.font = Font(name="Microsoft YaHei", size=10)
+            cell.data_type = "s"
             cell.border = border
             if col_index in (4, 5, 6):  # 类型、方法、优先级居中
                 cell.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
