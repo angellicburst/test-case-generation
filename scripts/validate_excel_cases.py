@@ -8,6 +8,8 @@ import re
 import sys
 from pathlib import Path
 
+from traceability_matrix import load_traceability_matrix, traceability_text
+
 EXPECTED_HEADERS = [
     "需求/追踪 ID",
     "用例 ID",
@@ -38,11 +40,17 @@ ALLOWED_PRIORITIES = {"P0", "P1", "P2", "P3", "P4"}
 TRACEABILITY_PATTERN = re.compile(r"^\[需求追溯\]\s+来源：(.+?)｜定位：(.+?)｜规则：(.+?)$")
 
 
-def validate_excel_file(file_path: Path, sheet_name: str = "测试用例") -> list[str]:
+def validate_excel_file(
+    file_path: Path,
+    traceability_matrix: dict[str, dict[str, object]] | None = None,
+    sheet_name: str = "测试用例",
+) -> list[str]:
     errors: list[str] = []
 
     if not file_path.is_file():
         return [f"文件不存在: {file_path}"]
+    if traceability_matrix is None:
+        return ["未提供需求追溯矩阵，无法核对追溯是否来自材料。"]
 
     try:
         from openpyxl import load_workbook
@@ -50,7 +58,7 @@ def validate_excel_file(file_path: Path, sheet_name: str = "测试用例") -> li
         return ["缺少 openpyxl 依赖，无法读取和校验 .xlsx 文件，请执行: pip install openpyxl"]
 
     try:
-        wb = load_workbook(filename=str(file_path), data_only=True)
+        wb = load_workbook(filename=str(file_path), data_only=False)
     except Exception as exc:
         return [f"无法读取 Excel 文件: {exc}"]
 
@@ -84,6 +92,13 @@ def validate_excel_file(file_path: Path, sheet_name: str = "测试用例") -> li
     if max_row < 3:
         errors.append("工作表中未发现有效用例数据行（数据应从第 3 行开始）。")
         return errors
+    if ws.freeze_panes != "A3":
+        errors.append("工作表必须冻结窗格至 A3。")
+    expected_filter_ref = f"A2:K{max_row}"
+    if ws.auto_filter.ref != expected_filter_ref:
+        errors.append(
+            f"工作表筛选范围必须为 {expected_filter_ref}，实际为 {ws.auto_filter.ref or '未设置'}。"
+        )
 
     for row_idx in range(3, max_row + 1):
         # 检查该行是否全空
@@ -92,6 +107,13 @@ def validate_excel_file(file_path: Path, sheet_name: str = "测试用例") -> li
             continue  # 跳过全空行
 
         valid_rows_count += 1
+
+        for col_idx in range(1, len(EXPECTED_HEADERS) + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            if cell.data_type == "f":
+                errors.append(
+                    f"第 {row_idx} 行字段“{EXPECTED_HEADERS[col_idx - 1]}”包含公式，必须使用纯文本。"
+                )
 
         # 检查必填项
         for field in MANDATORY_FIELDS:
@@ -107,6 +129,19 @@ def validate_excel_file(file_path: Path, sheet_name: str = "测试用例") -> li
             errors.append(
                 f"第 {row_idx} 行备注首行必须为“[需求追溯] 来源：<材料>｜定位：<位置>｜规则：<规则>”，不得仅使用内部编号。"
             )
+
+        case_id = str(ws.cell(row=row_idx, column=header_to_col["用例 ID"]).value or "").strip()
+        matched_entries = [
+            entry
+            for entry in traceability_matrix.values()
+            if case_id in entry["case_ids"]
+        ]
+        if len(matched_entries) != 1:
+            errors.append(
+                f"第 {row_idx} 行用例 ID “{case_id}”在需求追溯矩阵中必须恰好对应一项。"
+            )
+        elif notes.splitlines()[0] != traceability_text(matched_entries[0]):
+            errors.append(f"第 {row_idx} 行备注首行的需求追溯与矩阵记录不一致。")
 
         # 检查用例 ID
         case_id_val = ws.cell(row=row_idx, column=header_to_col["用例 ID"]).value
@@ -144,6 +179,7 @@ def main() -> None:
     parser.add_argument("path", nargs="?", help="要校验的 .xlsx 文件路径")
     parser.add_argument("--path", dest="opt_path", help="要校验的 .xlsx 文件路径（兼容选项）")
     parser.add_argument("--sheet-name", default="测试用例", help="测试用例工作表名称（默认为'测试用例'）")
+    parser.add_argument("--traceability-matrix", required=True, help="需求追溯矩阵 JSON 文件路径")
     args = parser.parse_args()
 
     target_path_str = args.opt_path or args.path
@@ -151,7 +187,12 @@ def main() -> None:
         parser.error("必须提供 .xlsx 文件路径")
 
     target_path = Path(target_path_str).expanduser().resolve()
-    errors = validate_excel_file(target_path, sheet_name=args.sheet_name)
+    traceability_matrix, matrix_errors = load_traceability_matrix(args.traceability_matrix)
+    errors = matrix_errors or validate_excel_file(
+        target_path,
+        traceability_matrix,
+        sheet_name=args.sheet_name,
+    )
 
     if errors:
         print(f"校验失败: 发现 {len(errors)} 处错误:\n", file=sys.stderr)

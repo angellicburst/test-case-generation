@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from traceability_matrix import load_traceability_matrix, traceability_text
+
 HEADERS = [
     "需求/追踪 ID",
     "用例 ID",
@@ -49,15 +51,11 @@ def normalize_multiline(value: Any) -> str:
     return str(value)
 
 
-def build_notes(case: dict[str, Any]) -> str:
-    traceability = str(case.get("traceability") or "").strip()
-    notes = normalize_multiline(case.get("notes", case.get("remark", ""))).strip()
+def build_notes(notes_value: Any, traceability: str) -> str:
+    notes = normalize_multiline(notes_value).strip()
     if not traceability and notes.startswith("[需求追溯]"):
         return notes
-    traceability = traceability.removeprefix("[需求追溯]").strip()
-    traceability = traceability.removeprefix("追溯：").strip()
-    trace_line = f"[需求追溯] {traceability}" if traceability else ""
-    return "\n".join(part for part in (trace_line, notes) if part)
+    return "\n".join(part for part in (traceability, notes) if part)
 
 
 def estimate_row_height(values: list[Any]) -> int:
@@ -71,7 +69,7 @@ def build_info_sheet(workbook: Any, meta: dict[str, Any]) -> None:
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
     sheet = workbook.create_sheet("生成说明")
-    sheet["A1"] = "测试用例生成与需求存疑说明"
+    sheet["A1"] = "测试用例生成说明"
     sheet.merge_cells("A1:B1")
     sheet["A1"].font = Font(name="Microsoft YaHei", bold=True, size=14)
     sheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
@@ -82,7 +80,6 @@ def build_info_sheet(workbook: Any, meta: dict[str, Any]) -> None:
         ("上线日期", meta.get("release_date", "")),
         ("用例数量", str(meta.get("case_count", ""))),
         ("覆盖范围", normalize_multiline(meta.get("coverage", ""))),
-        ("需求存疑与待确认清单", normalize_multiline(meta.get("open_questions", "无待确认项"))),
         ("补充说明", meta.get("notes") or meta.get("generated_note", "")),
     ]
 
@@ -107,7 +104,13 @@ def build_info_sheet(workbook: Any, meta: dict[str, Any]) -> None:
     sheet.column_dimensions["B"].width = 80
 
 
-def build_case_sheet(workbook: Any, title: str, cases: list[dict[str, Any]], sheet_name: str = "测试用例") -> None:
+def build_case_sheet(
+    workbook: Any,
+    title: str,
+    cases: list[dict[str, Any]],
+    traceability_matrix: dict[str, dict[str, Any]],
+    sheet_name: str = "测试用例",
+) -> None:
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
     ws = workbook.active
@@ -133,6 +136,18 @@ def build_case_sheet(workbook: Any, title: str, cases: list[dict[str, Any]], she
     ws.row_dimensions[2].height = 24
 
     for row_index, case in enumerate(cases, start=3):
+        traceability_ref = str(case.get("traceability_ref") or "").strip()
+        traceability = traceability_matrix.get(traceability_ref)
+        case_id = str(case.get("id", case.get("case_id", ""))).strip()
+        if not traceability_ref or traceability is None:
+            raise ValueError(f"用例 '{case_id or row_index}' 缺少有效的 traceability_ref。")
+        if traceability["status"] != "已覆盖":
+            raise ValueError(f"用例 '{case_id}' 只能关联已覆盖的追溯项。")
+        if case_id not in traceability["case_ids"]:
+            raise ValueError(
+                f"用例 '{case_id}' 不在追溯项 '{traceability_ref}' 的 case_ids 中。"
+            )
+        expected_traceability = traceability_text(traceability)
         values = [
             case.get("requirement_id", case.get("trace_id", "")),
             case.get("id", case.get("case_id", "")),
@@ -144,7 +159,7 @@ def build_case_sheet(workbook: Any, title: str, cases: list[dict[str, Any]], she
             normalize_multiline(case.get("test_data", "")),
             normalize_multiline(case.get("steps", case.get("step_description", ""))),
             normalize_multiline(case.get("expected_results", case.get("expected_result", ""))),
-            build_notes(case),
+            build_notes(case.get("notes", case.get("remark", "")), expected_traceability),
         ]
         for col_index, value in enumerate(values, start=1):
             cell = ws.cell(row=row_index, column=col_index, value=as_excel_text(value))
@@ -180,14 +195,20 @@ def load_cases_payload(input_json: str | Path) -> tuple[dict[str, Any], list[dic
     return meta or {}, cases
 
 
-def build_workbook(title: str, cases: list[dict[str, Any]], sheet_name: str = "测试用例", meta: dict[str, Any] | None = None) -> Any:
+def build_workbook(
+    title: str,
+    cases: list[dict[str, Any]],
+    traceability_matrix: dict[str, dict[str, Any]],
+    sheet_name: str = "测试用例",
+    meta: dict[str, Any] | None = None,
+) -> Any:
     try:
         from openpyxl import Workbook
     except ImportError as exc:
         raise RuntimeError("生成 xlsx 需要 openpyxl 库，请先安装: pip install openpyxl") from exc
 
     wb = Workbook()
-    build_case_sheet(wb, title, cases, sheet_name)
+    build_case_sheet(wb, title, cases, traceability_matrix, sheet_name)
     meta = meta or {}
     if "case_count" not in meta:
         meta["case_count"] = len(cases)
@@ -201,9 +222,13 @@ def main() -> None:
     parser.add_argument("--title", default="测试用例表", help="第 1 行显示的大标题")
     parser.add_argument("--sheet-name", default="测试用例", help="主工作表名称")
     parser.add_argument("--input-json", required=True, help="包含 cases 列表与可选 meta 的 JSON 文件路径")
+    parser.add_argument("--traceability-matrix", required=True, help="需求追溯矩阵 JSON 文件路径")
     args = parser.parse_args()
 
     meta, cases = load_cases_payload(args.input_json)
+    traceability_matrix, matrix_errors = load_traceability_matrix(args.traceability_matrix)
+    if matrix_errors:
+        raise SystemExit("\n".join(matrix_errors))
     title = meta.get("title") or args.title
     sheet_name = meta.get("sheet_name") or args.sheet_name
 
@@ -212,7 +237,13 @@ def main() -> None:
         raise SystemExit("输出路径必须是文件路径，不能是目录")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    workbook = build_workbook(title, cases, sheet_name=sheet_name, meta=meta)
+    workbook = build_workbook(
+        title,
+        cases,
+        traceability_matrix,
+        sheet_name=sheet_name,
+        meta=meta,
+    )
     workbook.save(output_path)
     print(f"成功生成测试用例工作簿: {output_path}")
 

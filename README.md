@@ -36,6 +36,7 @@ test-case-generation/
 ├── README.md                   # 本文件
 ├── references/
 │   ├── test-rules.md           # 用例设计、优先级、测试类型等通用规则
+│   ├── traceability-matrix.md  # 需求追溯矩阵结构与校验方式
 │   ├── markdown-format.md      # Markdown 字段、层级与校验规则
 │   └── excel-format.md         # Excel 字段、工作簿布局与生成脚本说明
 ├── assets/
@@ -43,6 +44,7 @@ test-case-generation/
 │   └── excel-test-case-template.xlsx
 ├── scripts/
 │   ├── create_excel_cases.py   # 按 JSON 生成 Excel 工作簿
+│   ├── traceability_matrix.py  # 读取并校验需求追溯矩阵
 │   ├── validate_markdown_lists.py
 │   └── validate_excel_cases.py
 ├── tests/
@@ -57,7 +59,7 @@ test-case-generation/
 
 > 根据 `01-PRD/xxx.md` 生成 Excel 测试用例，上线日期 2026-11-19。
 
-执行者按 [SKILL.md](SKILL.md) 的流程执行：确认材料完整性 → 拆分需求与功能点 → 设计用例 → 生成并校验产物 → 汇报用例数量、文件路径和待确认项。
+执行者按 [SKILL.md](SKILL.md) 的流程执行：确认材料完整性 → 建立需求追溯矩阵 → 设计用例 → 生成并校验产物 → 汇报用例数量、文件路径和待确认项。
 
 ### 直接使用脚本
 
@@ -66,8 +68,8 @@ test-case-generation/
 Markdown 校验：
 
 ```bash
-python "{本目录}/scripts/validate_markdown_lists.py" <文件路径>
-python "{本目录}/scripts/validate_markdown_lists.py" <文件路径> --fix
+python "{本目录}/scripts/validate_markdown_lists.py" <文件路径> --traceability-matrix "<矩阵.json>"
+python "{本目录}/scripts/validate_markdown_lists.py" <文件路径> --traceability-matrix "<矩阵.json>" --fix
 ```
 
 `--fix` 只会把多项字段列表改写为从 1 开始的有序列表，不会修正用例类型、数量声明或层级问题。
@@ -75,17 +77,17 @@ python "{本目录}/scripts/validate_markdown_lists.py" <文件路径> --fix
 Excel 生成与校验：
 
 ```bash
-python "{本目录}/scripts/create_excel_cases.py" --output "<输出文件.xlsx>" --input-json "<cases.json>"
+python "{本目录}/scripts/create_excel_cases.py" --output "<输出文件.xlsx>" --input-json "<cases.json>" --traceability-matrix "<矩阵.json>"
 
-python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>"
-python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" --sheet-name "<自定义工作表名称>"
+python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" --traceability-matrix "<矩阵.json>"
+python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" --traceability-matrix "<矩阵.json>" --sheet-name "<自定义工作表名称>"
 ```
 
 `create_excel_cases.py` 的 JSON 结构（`meta` 字段、数组字段写法、`sheet_name` 覆盖等）见 [Excel 规范](references/excel-format.md#生成脚本推荐)。
 
 ## 运行环境
 
-- Python 3.8 及以上（已在 3.12 实测通过），按本机命令使用 `python` 或 `python3`。
+- Python 3.12，按本机命令使用 `python` 或 `python3`。
 - 生成或校验 Excel 需要 `openpyxl`：
 
   ```bash
@@ -97,11 +99,10 @@ python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" --sheet-nam
 
 ## 关键规则速览
 
-- 通用设计规则（功能点拆分、测试类型、优先级、边界、断言、数据隔离、待确认清单等）见 [测试规则](references/test-rules.md)。
+- 通用设计规则（功能点拆分、测试类型、优先级、边界、断言、数据隔离等）见 [测试规则](references/test-rules.md)。
 - Markdown 当前格式要求：`- [ ]` 任务项、用例标题下首个非空行使用 `> [需求追溯] 来源：…｜定位：…｜规则：…` 引用、`> 用例数量: 用例 N 条` 数量声明、用例类型仅 `正向` / `反向`、不得使用 `- [x]` 或 `####` 旧式标题。详见 [Markdown 规范](references/markdown-format.md)。
 - Excel 要求：`测试用例` 与 `生成说明` 两个工作表、11 个标准列头、优先级 `P0`–`P4`、用例 ID 与标题唯一。详见 [Excel 规范](references/excel-format.md)。
-- Excel 每条用例在备注首行填写 `[需求追溯] 来源：…｜定位：…｜规则：…`；`需求/追踪 ID` 仅填写材料原文的正式编号，未提供则留空，不能替代追溯内容。
-- 需求存在未定义细节时，执行者会生成《需求存疑与待确认清单》；确认后反向优化用例并删除清单（Markdown 删章节，Excel 清空 `生成说明` 对应字段）。
+- 追溯矩阵是生成期唯一的追溯与待确认数据源；全部条目确认并完成校验后删除。`需求/追踪 ID` 仅填写材料原文的正式编号，未提供则留空。
 
 ## 常见问题
 

@@ -9,6 +9,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from traceability_matrix import load_traceability_matrix, traceability_text
+
 FIELD_PATTERN = re.compile(r"^(\s*)- (前置条件|测试步骤|预期结果)\s*$")
 TRACEABILITY_PATTERN = re.compile(r"^(\s*)>\s*(\S.*)$")
 TRACEABILITY_CONTENT_PATTERN = re.compile(
@@ -25,19 +27,40 @@ CASE_ITEM_PATTERN = re.compile(r"^\s*- \[[ xX]\]\s+([^-]+?)-.*-P[0-4]\s*$")
 NODE_PATTERN = re.compile(r"^(\s*)- \[[ xX]\]\s+")
 DESCRIPTION_PATTERN = re.compile(r"^\s*>\s*用例数量[:：]\s*用例\s*(\d+)\s*条\s*$")
 EXPECTED_RESULT_PATTERN = re.compile(r"^\s*-\s*预期结果\s*$")
+TITLE_PATTERN = re.compile(r"^# 测试用例 - \d{4}-\d{2}-\d{2} - \[.+\]\s*$")
 
 
-def validate(text: str) -> list[str]:
+def validate(
+    text: str,
+    traceability_matrix: dict[str, dict[str, object]] | None = None,
+) -> list[str]:
     lines = [line.expandtabs(4) for line in text.splitlines()]
     errors: list[str] = []
     cases: list[tuple[int, str, int]] = []
     declared_count: int | None = None
     node_stack: list[int] = []
+    description_indexes: list[int] = []
+
+    if not lines or not TITLE_PATTERN.match(lines[0]):
+        errors.append("文档首行必须为 `# 测试用例 - YYYY-MM-DD - [需求名称]`。")
+    else:
+        first_content_after_title = next(
+            (index for index, line in enumerate(lines[1:], start=1) if line.strip()),
+            None,
+        )
+        if first_content_after_title is None or not DESCRIPTION_PATTERN.match(
+            lines[first_content_after_title]
+        ):
+            errors.append("文档标题后首个非空行必须为用例数量声明。")
+        else:
+            declared_count = int(
+                DESCRIPTION_PATTERN.match(lines[first_content_after_title]).group(1)
+            )
 
     for index, line in enumerate(lines):
         description = DESCRIPTION_PATTERN.match(line)
         if description:
-            declared_count = int(description.group(1))
+            description_indexes.append(index)
         case_item = CASE_ITEM_PATTERN.match(line)
         if case_item and case_item.group(1) not in ("正向", "反向"):
             errors.append(
@@ -62,12 +85,18 @@ def validate(text: str) -> list[str]:
         while node_stack and node_stack[-1] >= indent:
             node_stack.pop()
         checkbox_case = CHECKBOX_CASE_PATTERN.match(line)
+        if indent not in (0, 2, 4, 6):
+            errors.append(f"第 {index + 1} 行的任务清单缩进必须为 2 个空格的层级。")
+        elif indent and (not node_stack or node_stack[-1] != indent - 2):
+            errors.append(f"第 {index + 1} 行的任务清单必须紧邻上一级节点。")
         if checkbox_case and not CASE_WITH_ID_PATTERN.match(line):
             cases.append((index, checkbox_case.group(2).strip(), indent))
-            if len(node_stack) < 2:
+            if indent not in (4, 6) or len(node_stack) < 2:
                 errors.append(
-                    f"第 {index + 1} 行的用例必须位于功能模块和测试类型的列表项下（至少两级缩进）。"
+                    f"第 {index + 1} 行的用例必须位于功能模块和测试类型的列表项下，缩进为 4 或 6 个空格。"
                 )
+        elif indent == 6:
+            errors.append(f"第 {index + 1} 行的 6 空格层级只能用于用例任务项。")
         node_stack.append(indent)
 
     seen_titles: set[str] = set()
@@ -79,6 +108,10 @@ def validate(text: str) -> list[str]:
 
     if not cases:
         errors.append("文档中未包含任何有效用例任务项。")
+    if traceability_matrix is None:
+        errors.append("未提供需求追溯矩阵，无法核对追溯是否来自材料。")
+    if len(description_indexes) > 1:
+        errors.append("文档只能包含一个用例数量声明。")
     if declared_count is None:
         errors.append("文档顶部缺少用例数量声明（`> 用例数量: 用例 N 条`）。")
     elif declared_count != len(cases):
@@ -86,10 +119,11 @@ def validate(text: str) -> list[str]:
             f"文档声明用例数量为 {declared_count}，实际用例任务项数量为 {len(cases)}。"
         )
 
-    for case_position, (case_index, _, case_indent) in enumerate(cases):
+    for case_position, (case_index, case_title, case_indent) in enumerate(cases):
         case_end = cases[case_position + 1][0] if case_position + 1 < len(cases) else len(lines)
         field_names: list[str] = []
         traceability_count = 0
+        actual_traceability = ""
         first_content_index = next(
             (
                 content_index
@@ -115,11 +149,27 @@ def validate(text: str) -> list[str]:
                     errors.append(
                         f"第 {content_index + 1} 行的需求追溯必须填写“来源、定位、规则”，不得仅使用内部编号。"
                     )
+                else:
+                    actual_traceability = traceability.group(2).strip()
         field_counts = Counter(field_names)
         if traceability_count == 0:
             errors.append(f"第 {case_index + 1} 行的用例标题下缺少需求追溯引用。")
         elif traceability_count > 1:
             errors.append(f"第 {case_index + 1} 行的用例包含重复的需求追溯引用。")
+        elif traceability_matrix is not None:
+            matched_entries = [
+                entry
+                for entry in traceability_matrix.values()
+                if case_title in entry["case_titles"]
+            ]
+            if len(matched_entries) != 1:
+                errors.append(
+                    f"第 {case_index + 1} 行的用例标题“{case_title}”在需求追溯矩阵中必须恰好对应一项。"
+                )
+            elif actual_traceability != traceability_text(matched_entries[0]):
+                errors.append(
+                    f"第 {case_index + 1} 行的需求追溯与矩阵记录不一致。"
+                )
         for field in ("前置条件", "测试步骤", "预期结果"):
             if field_counts[field] == 0:
                 errors.append(f"第 {case_index + 1} 行的用例缺少必填字段“{field}”。")
@@ -215,6 +265,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, help="Markdown test-case file to validate")
     parser.add_argument(
+        "--traceability-matrix",
+        type=Path,
+        required=True,
+        help="需求追溯矩阵 JSON 文件路径",
+    )
+    parser.add_argument(
         "--fix",
         action="store_true",
         help="Convert multi-item field lists to ordered lists",
@@ -237,7 +293,8 @@ def main() -> int:
             args.path.write_text(fixed, encoding="utf-8")
             text = fixed
 
-    errors = validate(text)
+    traceability_matrix, matrix_errors = load_traceability_matrix(args.traceability_matrix)
+    errors = matrix_errors or validate(text, traceability_matrix)
     if errors:
         print("Markdown list validation failed:", file=sys.stderr)
         print("\n".join(f"- {error}" for error in errors), file=sys.stderr)
