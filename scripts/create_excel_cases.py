@@ -51,11 +51,43 @@ def normalize_multiline(value: Any) -> str:
     return str(value)
 
 
-def build_notes(notes_value: Any, traceability: str) -> str:
+def build_notes(notes_value: Any, traceability_lines: list[str]) -> str:
     notes = normalize_multiline(notes_value).strip()
-    if not traceability and notes.startswith("[需求追溯]"):
-        return notes
-    return "\n".join(part for part in (traceability, notes) if part)
+    if notes.startswith("[需求追溯]"):
+        raise ValueError("备注不得手工填写需求追溯，请使用 traceability_refs。")
+    return "\n".join([*traceability_lines, *([notes] if notes else [])])
+
+
+def traceability_entries_for_case(
+    case: dict[str, Any],
+    traceability_matrix: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    raw_refs = case.get("traceability_refs")
+    if not isinstance(raw_refs, list) or not raw_refs:
+        raise ValueError("每条用例必须提供非空的 traceability_refs 数组。")
+
+    refs = [str(reference).strip() for reference in raw_refs]
+    if any(not reference for reference in refs) or len(set(refs)) != len(refs):
+        raise ValueError("traceability_refs 必须是无重复的非空追溯 ID。")
+
+    case_id = str(case.get("id", case.get("case_id", ""))).strip()
+    entries_by_reference: dict[str, dict[str, Any]] = {}
+    for reference in refs:
+        entry = traceability_matrix.get(reference)
+        if entry is None:
+            raise ValueError(f"用例 '{case_id or '未命名用例'}' 包含无效的 traceability_refs: '{reference}'。")
+        if entry["status"] != "已覆盖":
+            raise ValueError(f"用例 '{case_id}' 只能关联已覆盖的追溯项。")
+        if case_id not in entry["case_ids"]:
+            raise ValueError(
+                f"用例 '{case_id}' 不在追溯项 '{reference}' 的 case_ids 中。"
+            )
+        entries_by_reference[reference] = entry
+    return [
+        entry
+        for trace_id, entry in traceability_matrix.items()
+        if trace_id in entries_by_reference
+    ]
 
 
 def estimate_row_height(values: list[Any]) -> int:
@@ -136,18 +168,8 @@ def build_case_sheet(
     ws.row_dimensions[2].height = 24
 
     for row_index, case in enumerate(cases, start=3):
-        traceability_ref = str(case.get("traceability_ref") or "").strip()
-        traceability = traceability_matrix.get(traceability_ref)
-        case_id = str(case.get("id", case.get("case_id", ""))).strip()
-        if not traceability_ref or traceability is None:
-            raise ValueError(f"用例 '{case_id or row_index}' 缺少有效的 traceability_ref。")
-        if traceability["status"] != "已覆盖":
-            raise ValueError(f"用例 '{case_id}' 只能关联已覆盖的追溯项。")
-        if case_id not in traceability["case_ids"]:
-            raise ValueError(
-                f"用例 '{case_id}' 不在追溯项 '{traceability_ref}' 的 case_ids 中。"
-            )
-        expected_traceability = traceability_text(traceability)
+        traceability_entries = traceability_entries_for_case(case, traceability_matrix)
+        traceability_lines = [traceability_text(entry) for entry in traceability_entries]
         values = [
             case.get("requirement_id", case.get("trace_id", "")),
             case.get("id", case.get("case_id", "")),
@@ -159,7 +181,7 @@ def build_case_sheet(
             normalize_multiline(case.get("test_data", "")),
             normalize_multiline(case.get("steps", case.get("step_description", ""))),
             normalize_multiline(case.get("expected_results", case.get("expected_result", ""))),
-            build_notes(case.get("notes", case.get("remark", "")), expected_traceability),
+            build_notes(case.get("notes", case.get("remark", "")), traceability_lines),
         ]
         for col_index, value in enumerate(values, start=1):
             cell = ws.cell(row=row_index, column=col_index, value=as_excel_text(value))

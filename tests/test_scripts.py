@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,8 +16,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from create_excel_cases import build_workbook  # noqa: E402
 from traceability_matrix import load_traceability_matrix  # noqa: E402
+from sync_traceability import sync_excel, sync_markdown  # noqa: E402
 from validate_excel_cases import validate_excel_file  # noqa: E402
 from validate_markdown_lists import fix, validate  # noqa: E402
+from validate_traceability_bundle import validate_bundle  # noqa: E402
 
 
 VALID_MARKDOWN = """# 测试用例 - 2026-11-17 - [注册]
@@ -58,7 +62,7 @@ def excel_case(**overrides):
         "test_data": "<独立测试账号>",
         "steps": "提交注册",
         "expected_results": "注册成功",
-        "traceability_ref": "TRACE-REG-001",
+        "traceability_refs": ["TRACE-REG-001"],
         "notes": "无",
     }
     case.update(overrides)
@@ -75,11 +79,30 @@ def matrix_for_cases(*cases):
     }
 
 
+def multi_traceability_matrix():
+    return {
+        **deepcopy(TRACEABILITY_MATRIX),
+        "TRACE-REG-002": {
+            "id": "TRACE-REG-002",
+            "source": "注册需求.md",
+            "location": "2.2 注册成功",
+            "rule": "注册成功后显示新注册信息",
+            "status": "已覆盖",
+            "case_ids": ["TC-REG-001"],
+            "case_titles": ["提交合法注册"],
+        },
+    }
+
+
 def write_matrix(path: Path, matrix: dict[str, dict[str, object]]) -> None:
     path.write_text(
         json.dumps({"entries": list(matrix.values())}, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+def subprocess_env():
+    return {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
 
 class MarkdownValidationTests(unittest.TestCase):
@@ -186,15 +209,18 @@ class MarkdownValidationTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                env=subprocess_env(),
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+
             target.write_text(VALID_MARKDOWN, encoding="gbk")
             result = subprocess.run(
                 [sys.executable, str(ROOT / "scripts" / "validate_markdown_lists.py"), str(target)],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                env=subprocess_env(),
                 check=False,
             )
             self.assertNotEqual(result.returncode, 0)
@@ -205,10 +231,40 @@ class MarkdownValidationTests(unittest.TestCase):
         self.assertTrue(any("与矩阵记录不一致" in error for error in errors))
         self.assertTrue(any("未提供需求追溯矩阵" in error for error in validate(VALID_MARKDOWN)))
 
+    def test_markdown_supports_multiple_traceability_entries(self):
+        matrix = multi_traceability_matrix()
+        text = VALID_MARKDOWN.replace(
+            "      > [需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字\n",
+            "      > [需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字\n"
+            "      > [需求追溯] 来源：注册需求.md｜定位：2.2 注册成功｜规则：注册成功后显示新注册信息\n",
+        )
+        self.assertEqual(validate(text, matrix), [])
+        self.assertTrue(
+            any(
+                "需求追溯与矩阵记录不一致" in error
+                for error in validate(VALID_MARKDOWN, matrix)
+            )
+        )
+
+    def test_markdown_rejects_stale_matrix_title(self):
+        matrix = {
+            "TRACE-REG-001": {
+                **TRACEABILITY_MATRIX["TRACE-REG-001"],
+                "case_titles": ["已删除的注册用例"],
+            }
+        }
+        errors = validate(VALID_MARKDOWN, matrix)
+        self.assertTrue(
+            any("未出现在文档中" in error for error in errors)
+        )
+
     def test_assumption_case_marker_does_not_match_matrix_title(self):
         marked = VALID_MARKDOWN.replace("正向-提交合法注册-P0", "正向-提交合法注册[待确认]-P0")
         errors = validate(marked, TRACEABILITY_MATRIX)
-        self.assertTrue(any("必须恰好对应一项" in error for error in errors))
+        self.assertTrue(any("不得包含旧版“[待确认]”标记" in error for error in errors))
+
+    def test_markdown_has_no_cleanup_structure_requirement(self):
+        self.assertEqual(validate(VALID_MARKDOWN, TRACEABILITY_MATRIX), [])
 
     def test_invalid_traceability_matrix_reports_single_root_cause(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -227,6 +283,7 @@ class MarkdownValidationTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                env=subprocess_env(),
                 check=False,
             )
             self.assertNotEqual(result.returncode, 0)
@@ -252,7 +309,7 @@ class ExcelTests(unittest.TestCase):
             loaded, errors = load_traceability_matrix(matrix)
             self.assertEqual(errors, [])
             self.assertEqual(loaded["TRACE-REG-002"]["status"], "待确认")
-            cases = [excel_case(traceability_ref="TRACE-REG-002")]
+            cases = [excel_case(traceability_refs=["TRACE-REG-002"])]
             with self.assertRaisesRegex(ValueError, "只能关联已覆盖"):
                 build_workbook("测试用例", cases, loaded)
         invalid_status = {**pending, "status": "pending", "case_ids": [], "case_titles": []}
@@ -260,7 +317,27 @@ class ExcelTests(unittest.TestCase):
             matrix = Path(directory) / "matrix.json"
             write_matrix(matrix, {invalid_status["id"]: invalid_status})
             _, errors = load_traceability_matrix(matrix)
-            self.assertTrue(any("status 必须为“已覆盖”或“待确认”" in error for error in errors))
+            self.assertTrue(any("status 必须为“待覆盖”“已覆盖”或“待确认”" in error for error in errors))
+
+    def test_draft_matrix_cannot_pass_final_format_validation(self):
+        draft = {
+            "TRACE-REG-001": {
+                **TRACEABILITY_MATRIX["TRACE-REG-001"],
+                "status": "待覆盖",
+                "case_ids": [],
+                "case_titles": [],
+            }
+        }
+        self.assertTrue(
+            any("存在待覆盖条目" in error for error in validate(VALID_MARKDOWN, draft))
+        )
+        self.assertFalse(any("未在需求追溯矩阵中关联" in error for error in validate(VALID_MARKDOWN, draft)))
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "draft.xlsx"
+            build_workbook("测试用例", [excel_case()], TRACEABILITY_MATRIX).save(target)
+            errors = validate_excel_file(target, draft)
+            self.assertTrue(any("存在待覆盖条目" in error for error in errors))
+            self.assertFalse(any("未在需求追溯矩阵中关联" in error for error in errors))
 
     def test_matrix_separates_case_id_and_title_namespaces(self):
         entry = {
@@ -299,6 +376,20 @@ class ExcelTests(unittest.TestCase):
             self.assertEqual(
                 load_workbook(target)["测试用例"]["K3"].value,
                 "[需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字\n补充备注",
+            )
+
+    def test_excel_supports_multiple_traceability_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "multiple-traceability.xlsx"
+            case = excel_case(traceability_refs=["TRACE-REG-002", "TRACE-REG-001"])
+            matrix = multi_traceability_matrix()
+            build_workbook("测试用例", [case], matrix).save(target)
+            self.assertEqual(validate_excel_file(target, matrix), [])
+            self.assertEqual(
+                load_workbook(target)["测试用例"]["K3"].value,
+                "[需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字\n"
+                "[需求追溯] 来源：注册需求.md｜定位：2.2 注册成功｜规则：注册成功后显示新注册信息\n"
+                "无",
             )
 
     def test_excel_requirement_id_does_not_replace_traceability(self):
@@ -411,6 +502,28 @@ class ExcelTests(unittest.TestCase):
             self.assertTrue(any("优先级无效" in error for error in errors))
             self.assertFalse(any("需求/追踪 ID" in error for error in errors))
 
+    def test_excel_type_design_method_and_stale_matrix_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "invalid-enum.xlsx"
+            case = excel_case(type="异常测试", design_method="判定表")
+            matrix = matrix_for_cases(case)
+            matrix["TRACE-REG-001"]["case_ids"].append("TC-REG-STALE")
+            build_workbook("测试用例", [case], matrix).save(target)
+            errors = validate_excel_file(target, matrix)
+            self.assertTrue(any("用例类型无效" in error for error in errors))
+            self.assertTrue(any("设计方法无效" in error for error in errors))
+            self.assertTrue(any("TC-REG-STALE”未出现在工作表中" in error for error in errors))
+
+    def test_excel_optional_post_cleanup_stays_in_notes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "cleanup.xlsx"
+            case = excel_case(notes="后置清理：删除测试账号并恢复配置。")
+            matrix = matrix_for_cases(case)
+            build_workbook("测试用例", [case], matrix).save(target)
+            self.assertEqual(validate_excel_file(target, matrix), [])
+            notes = load_workbook(target)["测试用例"]["K3"].value
+            self.assertTrue(notes.endswith("\n后置清理：删除测试账号并恢复配置。"))
+
     def test_excel_cli_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "cases.json"
@@ -427,6 +540,7 @@ class ExcelTests(unittest.TestCase):
                 [sys.executable, str(ROOT / "scripts" / "create_excel_cases.py"), "--output", str(target), "--input-json", str(source), "--traceability-matrix", str(matrix_path)],
                 check=True,
                 capture_output=True,
+                env=subprocess_env(),
             )
             self.assertEqual(validate_excel_file(target, matrix, sheet_name="自定义"), [])
 
@@ -439,6 +553,166 @@ class ExcelTests(unittest.TestCase):
             validate_excel_file(ROOT / "assets" / "excel-test-case-template.xlsx", matrix),
             [],
         )
+
+    def test_bundle_validation_and_traceability_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            markdown = Path(directory) / "cases.md"
+            excel = Path(directory) / "cases.xlsx"
+            matrix_path = Path(directory) / "matrix.json"
+            matrix = multi_traceability_matrix()
+            markdown.write_text(VALID_MARKDOWN, encoding="utf-8")
+            case = excel_case(traceability_refs=["TRACE-REG-001", "TRACE-REG-002"])
+            build_workbook("测试用例", [case], matrix).save(excel)
+            matrix["TRACE-REG-001"]["rule"] = "手机号必须为11位且不得包含空格"
+            write_matrix(matrix_path, matrix)
+
+            self.assertTrue(validate_bundle(matrix_path, markdown, excel))
+            self.assertEqual(sync_markdown(markdown, matrix), [])
+            self.assertEqual(sync_excel(excel, matrix, "测试用例"), [])
+            self.assertEqual(validate_bundle(matrix_path, markdown, excel), [])
+
+    def test_traceability_sync_preserves_non_traceability_quote(self):
+        with tempfile.TemporaryDirectory() as directory:
+            markdown = Path(directory) / "cases.md"
+            note = "      > 执行说明：请在独立环境执行。\n"
+            original = VALID_MARKDOWN.replace(
+                "      > [需求追溯]", note + "      > [需求追溯]"
+            )
+            markdown.write_text(original, encoding="utf-8")
+            errors = sync_markdown(markdown, TRACEABILITY_MATRIX)
+            self.assertTrue(any("首个引用块不是需求追溯" in error for error in errors))
+            self.assertEqual(markdown.read_text(encoding="utf-8"), original)
+
+    def test_bundle_requires_each_covered_entry_in_both_formats(self):
+        with tempfile.TemporaryDirectory() as directory:
+            markdown = Path(directory) / "cases.md"
+            excel = Path(directory) / "cases.xlsx"
+            matrix_path = Path(directory) / "matrix.json"
+            matrix = matrix_for_cases(excel_case())
+            markdown.write_text(VALID_MARKDOWN, encoding="utf-8")
+            build_workbook("测试用例", [excel_case()], matrix).save(excel)
+            matrix["TRACE-REG-001"]["case_titles"] = []
+            write_matrix(matrix_path, matrix)
+            errors = validate_bundle(matrix_path, markdown, excel)
+            self.assertTrue(any("缺少 Markdown 用例关联" in error for error in errors))
+
+    def test_bundle_coverage_only_skips_format_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            markdown = Path(directory) / "cases.md"
+            excel = Path(directory) / "cases.xlsx"
+            matrix_path = Path(directory) / "matrix.json"
+            matrix = matrix_for_cases(excel_case())
+            invalid_markdown = VALID_MARKDOWN.replace(
+                "      - 前置条件\n        - 用户未注册。\n", ""
+            )
+            markdown.write_text(invalid_markdown, encoding="utf-8")
+            build_workbook("测试用例", [excel_case()], matrix).save(excel)
+            write_matrix(matrix_path, matrix)
+
+            full_errors = validate_bundle(matrix_path, markdown, excel)
+            self.assertTrue(any("缺少必填字段“前置条件”" in error for error in full_errors))
+            self.assertEqual(
+                validate_bundle(matrix_path, markdown, excel, coverage_only=True),
+                [],
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "validate_traceability_bundle.py"),
+                    "--traceability-matrix",
+                    str(matrix_path),
+                    "--markdown",
+                    str(markdown),
+                    "--excel",
+                    str(excel),
+                    "--coverage-only",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=subprocess_env(),
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            missing_format = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "validate_traceability_bundle.py"),
+                    "--traceability-matrix",
+                    str(matrix_path),
+                    "--markdown",
+                    str(markdown),
+                    "--coverage-only",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=subprocess_env(),
+                check=False,
+            )
+            self.assertNotEqual(missing_format.returncode, 0)
+            self.assertIn("必须同时提供", missing_format.stderr)
+
+            missing_paths = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "validate_traceability_bundle.py"),
+                    "--traceability-matrix",
+                    str(matrix_path),
+                    "--markdown",
+                    str(Path(directory) / "missing.md"),
+                    "--excel",
+                    str(Path(directory) / "missing.xlsx"),
+                    "--coverage-only",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=subprocess_env(),
+                check=False,
+            )
+            self.assertNotEqual(missing_paths.returncode, 0)
+            self.assertIn("Markdown 文件不存在", missing_paths.stderr)
+            self.assertIn("Excel 文件不存在", missing_paths.stderr)
+
+    def test_bundle_coverage_only_requires_both_format_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            markdown = Path(directory) / "cases.md"
+            excel = Path(directory) / "cases.xlsx"
+            matrix_path = Path(directory) / "matrix.json"
+            matrix = matrix_for_cases(excel_case())
+            matrix["TRACE-REG-001"]["case_titles"] = []
+            markdown.write_text(VALID_MARKDOWN, encoding="utf-8")
+            build_workbook("测试用例", [excel_case()], matrix).save(excel)
+            write_matrix(matrix_path, matrix)
+
+            errors = validate_bundle(
+                matrix_path,
+                markdown,
+                excel,
+                coverage_only=True,
+            )
+            self.assertTrue(any("缺少 Markdown 用例关联" in error for error in errors))
+            self.assertTrue(
+                any("仅覆盖核对必须同时提供" in error for error in validate_bundle(
+                    matrix_path,
+                    markdown_path=markdown,
+                    coverage_only=True,
+                ))
+            )
+
+            matrix["TRACE-REG-001"]["status"] = "待覆盖"
+            matrix["TRACE-REG-001"]["case_ids"] = []
+            write_matrix(matrix_path, matrix)
+            draft_errors = validate_bundle(
+                matrix_path,
+                markdown,
+                excel,
+                coverage_only=True,
+            )
+            self.assertTrue(any("存在待覆盖条目" in error for error in draft_errors))
 
     def test_markdown_template_uses_matrix_as_the_only_pending_source(self):
         template = (ROOT / "assets" / "md-test-case-template.md").read_text(encoding="utf-8")

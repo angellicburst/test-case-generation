@@ -9,13 +9,16 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from traceability_matrix import load_traceability_matrix, traceability_text
+from traceability_matrix import (
+    entries_for_case_title,
+    final_matrix_errors,
+    load_traceability_matrix,
+    TRACEABILITY_PATTERN,
+    traceability_text,
+)
 
 FIELD_PATTERN = re.compile(r"^(\s*)- (前置条件|测试步骤|预期结果)\s*$")
-TRACEABILITY_PATTERN = re.compile(r"^(\s*)>\s*(\S.*)$")
-TRACEABILITY_CONTENT_PATTERN = re.compile(
-    r"^\[需求追溯\]\s+来源：(.+?)｜定位：(.+?)｜规则：(.+?)$"
-)
+TRACEABILITY_QUOTE_PATTERN = re.compile(r"^(\s*)>\s*(\S.*)$")
 CHILD_PATTERN = re.compile(r"^(\s{2,})(?:(-)|(\d+)\.)\s+.+$")
 LEGACY_CASE_PATTERN = re.compile(r"^####\s+.+-P[0-4]\s*$")
 CHECKBOX_CASE_PATTERN = re.compile(r"^\s*- \[ \] (正向|反向)-(.+)-P[0-4]\s*$")
@@ -26,7 +29,6 @@ CASE_WITH_ID_PATTERN = re.compile(
 CASE_ITEM_PATTERN = re.compile(r"^\s*- \[[ xX]\]\s+([^-]+?)-.*-P[0-4]\s*$")
 NODE_PATTERN = re.compile(r"^(\s*)- \[[ xX]\]\s+")
 DESCRIPTION_PATTERN = re.compile(r"^\s*>\s*用例数量[:：]\s*用例\s*(\d+)\s*条\s*$")
-EXPECTED_RESULT_PATTERN = re.compile(r"^\s*-\s*预期结果\s*$")
 TITLE_PATTERN = re.compile(r"^# 测试用例 - \d{4}-\d{2}-\d{2} - \[.+\]\s*$")
 
 
@@ -38,6 +40,7 @@ def validate(
     errors: list[str] = []
     cases: list[tuple[int, str, int]] = []
     declared_count: int | None = None
+    matrix_finalized = False
     node_stack: list[int] = []
     description_indexes: list[int] = []
 
@@ -110,6 +113,10 @@ def validate(
         errors.append("文档中未包含任何有效用例任务项。")
     if traceability_matrix is None:
         errors.append("未提供需求追溯矩阵，无法核对追溯是否来自材料。")
+    else:
+        matrix_errors = final_matrix_errors(traceability_matrix)
+        errors.extend(matrix_errors)
+        matrix_finalized = not matrix_errors
     if len(description_indexes) > 1:
         errors.append("文档只能包含一个用例数量声明。")
     if declared_count is None:
@@ -119,11 +126,13 @@ def validate(
             f"文档声明用例数量为 {declared_count}，实际用例任务项数量为 {len(cases)}。"
         )
 
+    actual_case_titles: set[str] = set()
     for case_position, (case_index, case_title, case_indent) in enumerate(cases):
+        actual_case_titles.add(case_title)
         case_end = cases[case_position + 1][0] if case_position + 1 < len(cases) else len(lines)
         field_names: list[str] = []
-        traceability_count = 0
-        actual_traceability = ""
+        traceability_indexes: list[int] = []
+        actual_traceability: list[str] = []
         first_content_index = next(
             (
                 content_index
@@ -139,42 +148,58 @@ def validate(
             field = FIELD_PATTERN.match(line)
             if field and len(field.group(1)) == case_indent + 2:
                 field_names.append(field.group(2))
-            traceability = TRACEABILITY_PATTERN.match(line)
+            traceability = TRACEABILITY_QUOTE_PATTERN.match(line)
             if traceability and len(traceability.group(1)) == case_indent + 2:
-                traceability_count += 1
-                if content_index != first_content_index:
-                    errors.append(f"第 {case_index + 1} 行的用例必须在标题下首个非空行填写需求追溯。")
-                traceability_content = TRACEABILITY_CONTENT_PATTERN.match(traceability.group(2).strip())
+                traceability_indexes.append(content_index)
+                traceability_content = TRACEABILITY_PATTERN.match(traceability.group(2).strip())
                 if not traceability_content or not all(part.strip() for part in traceability_content.groups()):
                     errors.append(
                         f"第 {content_index + 1} 行的需求追溯必须填写“来源、定位、规则”，不得仅使用内部编号。"
                     )
                 else:
-                    actual_traceability = traceability.group(2).strip()
+                    actual_traceability.append(traceability.group(2).strip())
         field_counts = Counter(field_names)
-        if traceability_count == 0:
+        if not traceability_indexes:
             errors.append(f"第 {case_index + 1} 行的用例标题下缺少需求追溯引用。")
-        elif traceability_count > 1:
-            errors.append(f"第 {case_index + 1} 行的用例包含重复的需求追溯引用。")
-        elif traceability_matrix is not None:
-            matched_entries = [
-                entry
-                for entry in traceability_matrix.values()
-                if case_title in entry["case_titles"]
-            ]
-            if len(matched_entries) != 1:
-                errors.append(
-                    f"第 {case_index + 1} 行的用例标题“{case_title}”在需求追溯矩阵中必须恰好对应一项。"
-                )
-            elif actual_traceability != traceability_text(matched_entries[0]):
-                errors.append(
-                    f"第 {case_index + 1} 行的需求追溯与矩阵记录不一致。"
-                )
+        else:
+            expected_indexes = list(
+                range(traceability_indexes[0], traceability_indexes[0] + len(traceability_indexes))
+            )
+            if traceability_indexes[0] != first_content_index:
+                errors.append(f"第 {case_index + 1} 行的用例必须在标题下首个非空行填写需求追溯。")
+            if traceability_indexes != expected_indexes:
+                errors.append(f"第 {case_index + 1} 行的多条需求追溯必须连续输出。")
+            if traceability_matrix is not None and matrix_finalized:
+                matched_entries = entries_for_case_title(traceability_matrix, case_title)
+                expected_traceability = [
+                    traceability_text(entry)
+                    for entry in matched_entries
+                ]
+                if not matched_entries:
+                    errors.append(
+                        f"第 {case_index + 1} 行的用例标题“{case_title}”未在需求追溯矩阵中关联。"
+                    )
+                elif actual_traceability != expected_traceability:
+                    errors.append(
+                        f"第 {case_index + 1} 行的需求追溯与矩阵记录不一致。"
+                    )
+        if "[待确认]" in "\n".join(lines[case_index:case_end]):
+            errors.append(f"第 {case_index + 1} 行的用例不得包含旧版“[待确认]”标记。")
         for field in ("前置条件", "测试步骤", "预期结果"):
             if field_counts[field] == 0:
                 errors.append(f"第 {case_index + 1} 行的用例缺少必填字段“{field}”。")
             elif field_counts[field] > 1:
                 errors.append(f"第 {case_index + 1} 行的用例包含重复的“{field}”字段。")
+
+    if traceability_matrix is not None and matrix_finalized:
+        for entry in traceability_matrix.values():
+            if entry["status"] != "已覆盖":
+                continue
+            for case_title in entry["case_titles"]:
+                if case_title not in actual_case_titles:
+                    errors.append(
+                        f"需求追溯矩阵中的 Markdown 用例标题“{case_title}”未出现在文档中。"
+                    )
 
     for index, line in enumerate(lines):
         match = FIELD_PATTERN.match(line)

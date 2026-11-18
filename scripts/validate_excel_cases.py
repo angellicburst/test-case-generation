@@ -8,7 +8,13 @@ import re
 import sys
 from pathlib import Path
 
-from traceability_matrix import load_traceability_matrix, traceability_text
+from traceability_matrix import (
+    entries_for_case_id,
+    final_matrix_errors,
+    load_traceability_matrix,
+    TRACEABILITY_PATTERN,
+    traceability_text,
+)
 
 EXPECTED_HEADERS = [
     "需求/追踪 ID",
@@ -36,8 +42,25 @@ MANDATORY_FIELDS = [
     "备注",
 ]
 
-ALLOWED_PRIORITIES = {"P0", "P1", "P2", "P3", "P4"}
-TRACEABILITY_PATTERN = re.compile(r"^\[需求追溯\]\s+来源：(.+?)｜定位：(.+?)｜规则：(.+?)$")
+ALLOWED_PRIORITIES = ("P0", "P1", "P2", "P3", "P4")
+ALLOWED_CASE_TYPES = (
+    "功能测试",
+    "回归测试",
+    "性能测试",
+    "安全测试",
+    "兼容性测试",
+    "易用性测试",
+    "可靠性测试",
+)
+ALLOWED_DESIGN_METHODS = (
+    "等价类划分",
+    "边界值分析",
+    "判定表法",
+    "状态迁移法",
+    "错误推测法",
+    "正交试验",
+    "场景分析法",
+)
 
 
 def validate_excel_file(
@@ -51,6 +74,9 @@ def validate_excel_file(
         return [f"文件不存在: {file_path}"]
     if traceability_matrix is None:
         return ["未提供需求追溯矩阵，无法核对追溯是否来自材料。"]
+    matrix_errors = final_matrix_errors(traceability_matrix)
+    errors.extend(matrix_errors)
+    matrix_finalized = not matrix_errors
 
     try:
         from openpyxl import load_workbook
@@ -86,6 +112,7 @@ def validate_excel_file(
 
     seen_case_ids: set[str] = set()
     seen_titles: set[str] = set()
+    actual_case_ids: set[str] = set()
     valid_rows_count = 0
 
     max_row = ws.max_row or 0
@@ -122,26 +149,44 @@ def validate_excel_file(
             if val is None or not str(val).strip():
                 errors.append(f"第 {row_idx} 行缺少必填字段: '{field}'。")
 
+        if any(
+            "[待确认]" in str(value or "")
+            for value in row_vals
+        ):
+            errors.append(f"第 {row_idx} 行不得包含旧版“[待确认]”标记。")
         notes_val = ws.cell(row=row_idx, column=header_to_col["备注"]).value
         notes = str(notes_val).strip() if notes_val is not None else ""
-        traceability = TRACEABILITY_PATTERN.match(notes.splitlines()[0] if notes else "")
-        if not traceability or not all(part.strip() for part in traceability.groups()):
+        note_lines = notes.splitlines()
+        traceability_lines: list[str] = []
+        for note_line in note_lines:
+            traceability = TRACEABILITY_PATTERN.match(note_line)
+            if not traceability:
+                break
+            if not all(part.strip() for part in traceability.groups()):
+                break
+            traceability_lines.append(note_line)
+        if not traceability_lines:
             errors.append(
-                f"第 {row_idx} 行备注首行必须为“[需求追溯] 来源：<材料>｜定位：<位置>｜规则：<规则>”，不得仅使用内部编号。"
+                f"第 {row_idx} 行备注开头必须为“[需求追溯] 来源：<材料>｜定位：<位置>｜规则：<规则>”，不得仅使用内部编号。"
             )
+        elif any(line.startswith("[需求追溯]") for line in note_lines[len(traceability_lines):]):
+            errors.append(f"第 {row_idx} 行的多条需求追溯必须连续输出。")
 
         case_id = str(ws.cell(row=row_idx, column=header_to_col["用例 ID"]).value or "").strip()
-        matched_entries = [
-            entry
-            for entry in traceability_matrix.values()
-            if case_id in entry["case_ids"]
+        actual_case_ids.add(case_id)
+        matched_entries = entries_for_case_id(traceability_matrix, case_id)
+        expected_traceability = [
+            traceability_text(entry)
+            for entry in matched_entries
         ]
-        if len(matched_entries) != 1:
+        if not matrix_finalized:
+            pass
+        elif not matched_entries:
             errors.append(
-                f"第 {row_idx} 行用例 ID “{case_id}”在需求追溯矩阵中必须恰好对应一项。"
+                f"第 {row_idx} 行用例 ID “{case_id}”未在需求追溯矩阵中关联。"
             )
-        elif notes.splitlines()[0] != traceability_text(matched_entries[0]):
-            errors.append(f"第 {row_idx} 行备注首行的需求追溯与矩阵记录不一致。")
+        elif traceability_lines != expected_traceability:
+            errors.append(f"第 {row_idx} 行备注中的需求追溯与矩阵记录不一致。")
 
         # 检查用例 ID
         case_id_val = ws.cell(row=row_idx, column=header_to_col["用例 ID"]).value
@@ -165,11 +210,32 @@ def validate_excel_file(
             p_str = str(priority_val).strip().upper()
             if p_str not in ALLOWED_PRIORITIES:
                 errors.append(
-                    f"第 {row_idx} 行优先级无效: '{priority_val}'，必须为 {ALLOWED_PRIORITIES} 之一。"
+                    f"第 {row_idx} 行优先级无效: '{priority_val}'，必须为 {'、'.join(ALLOWED_PRIORITIES)} 之一。"
                 )
+
+        case_type = str(ws.cell(row=row_idx, column=header_to_col["用例类型"]).value or "").strip()
+        if case_type and case_type not in ALLOWED_CASE_TYPES:
+            errors.append(
+                f"第 {row_idx} 行用例类型无效: '{case_type}'，必须为 {'、'.join(ALLOWED_CASE_TYPES)} 之一。"
+            )
+
+        design_method = str(ws.cell(row=row_idx, column=header_to_col["设计方法"]).value or "").strip()
+        if design_method and design_method not in ALLOWED_DESIGN_METHODS:
+            errors.append(
+                f"第 {row_idx} 行设计方法无效: '{design_method}'，必须为 {'、'.join(ALLOWED_DESIGN_METHODS)} 之一。"
+            )
 
     if valid_rows_count == 0:
         errors.append("工作表中未包含任何有效用例数据行。")
+    if matrix_finalized:
+        for entry in traceability_matrix.values():
+            if entry["status"] != "已覆盖":
+                continue
+            for case_id in entry["case_ids"]:
+                if case_id not in actual_case_ids:
+                    errors.append(
+                        f"需求追溯矩阵中的 Excel 用例 ID “{case_id}”未出现在工作表中。"
+                    )
 
     return errors
 

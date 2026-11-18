@@ -46,7 +46,9 @@ test-case-generation/
 │   ├── create_excel_cases.py   # 按 JSON 生成 Excel 工作簿
 │   ├── traceability_matrix.py  # 读取并校验需求追溯矩阵
 │   ├── validate_markdown_lists.py
-│   └── validate_excel_cases.py
+│   ├── validate_excel_cases.py
+│   ├── validate_traceability_bundle.py
+│   └── sync_traceability.py
 ├── tests/
 │   └── test_scripts.py         # 脚本自动回归测试
 └── evals/
@@ -59,7 +61,7 @@ test-case-generation/
 
 > 根据 `01-PRD/xxx.md` 生成 Excel 测试用例，上线日期 2026-11-19。
 
-执行者按 [SKILL.md](SKILL.md) 的流程执行：确认材料完整性 → 建立需求追溯矩阵 → 设计用例 → 生成并校验产物 → 汇报用例数量、文件路径和待确认项。
+执行者按 [SKILL.md](SKILL.md) 的流程执行：确认材料完整性 → 建立需求追溯矩阵 → 设计用例 → 矩阵定稿 → 校验产物 → 汇报用例、矩阵和待确认项。
 
 ### 直接使用脚本
 
@@ -85,6 +87,23 @@ python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" --traceabil
 
 `create_excel_cases.py` 的 JSON 结构（`meta` 字段、数组字段写法、`sheet_name` 覆盖等）见 [Excel 规范](references/excel-format.md#生成脚本推荐)。
 
+同时交付 Markdown 和 Excel 时，分别通过格式校验后执行仅覆盖核对；修改矩阵后可同步两种产物的追溯文本：
+
+```bash
+python "{本目录}/scripts/validate_traceability_bundle.py" \
+  --traceability-matrix "<矩阵.json>" \
+  --markdown "<文件.md>" \
+  --excel "<文件.xlsx>" \
+  --coverage-only
+
+python "{本目录}/scripts/sync_traceability.py" \
+  --traceability-matrix "<矩阵.json>" \
+  --markdown "<文件.md>" \
+  --excel "<文件.xlsx>"
+```
+
+`--coverage-only` 仅核对矩阵中的跨格式覆盖关联，依赖上述 Markdown、Excel 格式校验已通过；不带该参数时，命令会重新执行两种格式校验后再核对覆盖，适合单独执行时使用。
+
 ## 运行环境
 
 - Python 3.12，按本机命令使用 `python` 或 `python3`。
@@ -102,7 +121,7 @@ python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" --traceabil
 - 通用设计规则（功能点拆分、测试类型、优先级、边界、断言、数据隔离等）见 [测试规则](references/test-rules.md)。
 - Markdown 当前格式要求：`- [ ]` 任务项、用例标题下首个非空行使用 `> [需求追溯] 来源：…｜定位：…｜规则：…` 引用、`> 用例数量: 用例 N 条` 数量声明、用例类型仅 `正向` / `反向`、不得使用 `- [x]` 或 `####` 旧式标题。详见 [Markdown 规范](references/markdown-format.md)。
 - Excel 要求：`测试用例` 与 `生成说明` 两个工作表、11 个标准列头、优先级 `P0`–`P4`、用例 ID 与标题唯一。详见 [Excel 规范](references/excel-format.md)。
-- 追溯矩阵是生成期唯一的追溯与待确认数据源；全部条目确认并完成校验后删除。`需求/追踪 ID` 仅填写材料原文的正式编号，未提供则留空。
+- 追溯矩阵是用例的长期伴随交付物；其中用 `待覆盖`、`已覆盖`、`待确认` 管理覆盖状态。`需求/追踪 ID` 仅填写材料原文的正式编号，未提供则留空。
 
 ## 常见问题
 
