@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
-from traceability_matrix import load_traceability_matrix, traceability_text
+from traceability_matrix import configure_utf8_stderr, load_traceability_matrix, traceability_text
 
 HEADERS = [
     "需求/追踪 ID",
@@ -227,7 +229,7 @@ def build_workbook(
     try:
         from openpyxl import Workbook
     except ImportError as exc:
-        raise RuntimeError("生成 xlsx 需要 openpyxl 库，请先安装: pip install openpyxl") from exc
+        raise RuntimeError('生成 xlsx 需要 openpyxl 库，请先安装: pip install "openpyxl>=3.1,<4"') from exc
 
     wb = Workbook()
     build_case_sheet(wb, title, cases, traceability_matrix, sheet_name)
@@ -238,13 +240,33 @@ def build_workbook(
     return wb
 
 
+def save_workbook_atomic(workbook: Any, path: Path) -> None:
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.stem}.",
+        suffix=path.suffix or ".xlsx",
+        dir=str(path.parent),
+    )
+    os.close(fd)
+    try:
+        workbook.save(temp_name)
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
 def main() -> None:
+    configure_utf8_stderr()
     parser = argparse.ArgumentParser(description="生成标准的 .xlsx 格式测试用例工作簿。")
     parser.add_argument("--output", required=True, help="输出 .xlsx 文件绝对路径")
     parser.add_argument("--title", default="测试用例表", help="第 1 行显示的大标题")
     parser.add_argument("--sheet-name", default="测试用例", help="主工作表名称")
     parser.add_argument("--input-json", required=True, help="包含 cases 列表与可选 meta 的 JSON 文件路径")
     parser.add_argument("--traceability-matrix", required=True, help="需求追溯矩阵 JSON 文件路径")
+    parser.add_argument("--force", action="store_true", help="输出文件已存在时确认覆盖")
     args = parser.parse_args()
 
     meta, cases = load_cases_payload(args.input_json)
@@ -257,6 +279,10 @@ def main() -> None:
     output_path = Path(args.output).expanduser().resolve()
     if output_path.exists() and output_path.is_dir():
         raise SystemExit("输出路径必须是文件路径，不能是目录")
+    if output_path.exists() and not args.force:
+        raise SystemExit(
+            f"输出文件已存在: {output_path}。确认覆盖后请追加 --force。"
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     workbook = build_workbook(
@@ -266,7 +292,7 @@ def main() -> None:
         sheet_name=sheet_name,
         meta=meta,
     )
-    workbook.save(output_path)
+    save_workbook_atomic(workbook, output_path)
     print(f"成功生成测试用例工作簿: {output_path}")
 
 

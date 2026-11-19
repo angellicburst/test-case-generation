@@ -8,7 +8,7 @@
 
 - 已提供需求材料，需要拆分功能点并生成可执行、可验证、可追溯的测试用例。
 - 需要输出 Markdown 或 Excel（`.xlsx`）格式的用例文件。
-- 同一次需求需要同时输出多种格式（共享需求事实与覆盖口径，各格式独立设计）。
+- 同一次需求需要同时输出多种格式（共享业务测试设计基线，各格式独立编排与渲染）。
 
 不适用于：
 
@@ -26,7 +26,7 @@
 | Markdown | `测试用例-{上线日期}-{需求名称}.md` | 任务清单树，便于评审和版本管理 |
 | Excel | `测试用例-{上线日期}-{需求名称}.xlsx` | 11 列标准表格，含 `测试用例` 与 `生成说明` 工作表 |
 
-用户未指定格式时默认 Markdown。输出路径优先级：用户指定目录或文件名 → 项目已有 `03-TCD/{上线日期}/{格式}/` 约定 → 询问用户。`{格式}` 取 `Markdown` 或 `Excel`。
+用户未指定格式时默认 Markdown。输出路径优先级：用户指定目录或完整文件名 → 项目已有 `03-TCD/{上线日期}/{格式}/` 约定 → 询问用户。`{格式}` 取 `Markdown` 或 `Excel`。`{上线日期}` 为 `YYYY-MM-DD`；用户确认不使用具体日期时，默认文件名、标题和矩阵中写 `未指定日期`；用户明确指定完整文件名时原样使用，且不据此推断上线日期。
 
 ## 目录结构
 
@@ -34,6 +34,7 @@
 test-case-generation/
 ├── SKILL.md                    # 执行规范与流程
 ├── README.md                   # 本文件
+├── requirements.txt            # Python 依赖
 ├── references/
 │   ├── test-rules.md           # 用例设计、优先级、测试类型等通用规则
 │   ├── traceability-matrix.md  # 需求追溯矩阵结构与校验方式
@@ -74,7 +75,7 @@ python "{本目录}/scripts/validate_markdown_lists.py" <文件路径> --traceab
 python "{本目录}/scripts/validate_markdown_lists.py" <文件路径> --traceability-matrix "<矩阵.json>" --fix
 ```
 
-`--fix` 只会把多项字段列表改写为从 1 开始的有序列表，不会修正用例类型、数量声明或层级问题。
+`--fix` 只会把多项字段的直接子列表改写为从 1 开始的有序列表，不会修正用例类型、数量声明、层级问题或嵌套说明；写入使用同目录临时文件替换。
 
 Excel 生成与校验：
 
@@ -85,36 +86,30 @@ python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" --traceabil
 python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" --traceability-matrix "<矩阵.json>" --sheet-name "<自定义工作表名称>"
 ```
 
-`create_excel_cases.py` 的 JSON 结构（`meta` 字段、数组字段写法、`sheet_name` 覆盖等）见 [Excel 规范](references/excel-format.md#生成脚本推荐)。
+`create_excel_cases.py` 默认拒绝覆盖已存在的输出文件；用户确认覆盖后，在生成命令末尾追加 `--force`。其 JSON 结构（`meta` 字段、数组字段写法、`sheet_name` 覆盖等）见 [Excel 规范](references/excel-format.md#生成脚本推荐)。
 
 同时交付 Markdown 和 Excel 时，分别通过格式校验后执行仅覆盖核对；修改矩阵后可同步两种产物的追溯文本：
 
 ```bash
-python "{本目录}/scripts/validate_traceability_bundle.py" \
-  --traceability-matrix "<矩阵.json>" \
-  --markdown "<文件.md>" \
-  --excel "<文件.xlsx>" \
-  --coverage-only
+python "{本目录}/scripts/validate_traceability_bundle.py" --traceability-matrix "<矩阵.json>" --markdown "<文件.md>" --excel "<文件.xlsx>" --coverage-only
 
-python "{本目录}/scripts/sync_traceability.py" \
-  --traceability-matrix "<矩阵.json>" \
-  --markdown "<文件.md>" \
-  --excel "<文件.xlsx>"
+python "{本目录}/scripts/sync_traceability.py" --traceability-matrix "<矩阵.json>" --markdown "<文件.md>" --excel "<文件.xlsx>"
 ```
 
 `--coverage-only` 仅核对矩阵中的跨格式覆盖关联，依赖上述 Markdown、Excel 格式校验已通过；不带该参数时，命令会重新执行两种格式校验后再核对覆盖，适合单独执行时使用。
+以上命令均为单行，Bash 和 PowerShell 均可直接执行。
 
 ## 运行环境
 
-- Python 3.12，按本机命令使用 `python` 或 `python3`。
+- Python 3.12+（最低要求 3.12），按本机命令使用 `python` 或 `python3`。
 - 生成或校验 Excel 需要 `openpyxl`：
 
   ```bash
-  pip install openpyxl
+  pip install -r "{本目录}/requirements.txt"
   ```
 
 - Markdown 用例文件必须使用 UTF-8 编码。
-- Windows 终端中文乱码时，可先执行 `chcp 65001`，或设置 `PYTHONIOENCODING=utf-8`。
+- 脚本的中文错误信息统一以 UTF-8 输出；接收错误输出的终端或管道应按 UTF-8 解码。
 
 ## 关键规则速览
 
@@ -127,7 +122,7 @@ python "{本目录}/scripts/sync_traceability.py" \
 
 **提示缺少 openpyxl**
 
-执行 `pip install openpyxl`；如果当前环境不允许安装，可先只输出 Markdown，或按 SKILL.md 的预检流程与用户确认后跳过 Excel。
+执行 `pip install -r "{本目录}/requirements.txt"`；如果当前环境不允许安装，可先只输出 Markdown，或按 SKILL.md 的预检流程与用户确认后跳过 Excel。
 
 **找不到校验脚本**
 
@@ -139,12 +134,12 @@ python "{本目录}/scripts/sync_traceability.py" \
 
 **终端输出中文乱码**
 
-执行 `chcp 65001`，或设置 `PYTHONIOENCODING=utf-8`；这不影响文件内容和校验结果。
+校验、追溯总校验、同步和 Excel 生成脚本的错误输出均为 UTF-8。若通过管道或日志系统接收错误输出，请将接收端编码设为 UTF-8；这不影响文件内容和校验结果。
 
 ## 维护约定
 
 - `SKILL.md` 负责流程，`references/` 负责规则与格式，`scripts/` 负责执行；修改规则时同步检查这三处，避免同一规则多处重复。
-- 修改脚本或格式后，至少验证一份当前格式 Markdown 用例、Excel 模板、脚本生成的 Excel 样例，并跑一遍 `evals/evals.json` 中的回归场景。
+- 修改脚本或格式后，至少验证一份当前格式 Markdown 用例、Excel 模板、脚本生成的 Excel 样例；代理行为评测按 `evals/evals.json` 逐条执行并人工复核。
 - README 只维护导航、上手和常见问题。
 
 ### 自动回归测试

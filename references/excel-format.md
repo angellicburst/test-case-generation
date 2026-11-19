@@ -67,12 +67,10 @@
 当智能体已整理好用例的结构化 JSON 数据时，推荐直接调用技能内置的构建脚本一键生成样式完备的工作簿：
 
 ```bash
-python "{技能根目录}/scripts/create_excel_cases.py" \
-  --output "<输出绝对路径.xlsx>" \
-  --title "测试用例 - {上线日期} - [{需求名称}]" \
-  --input-json "<包含cases数组与meta的临时json路径>" \
-  --traceability-matrix "<需求追溯矩阵.json>"
+python "{技能根目录}/scripts/create_excel_cases.py" --output "<输出绝对路径.xlsx>" --title "测试用例 - {上线日期} - [{需求名称}]" --input-json "<包含cases数组与meta的临时json路径>" --traceability-matrix "<需求追溯矩阵.json>"
 ```
+
+输出文件已存在时，脚本默认拒绝写入并返回非零退出码；用户确认覆盖后，在命令末尾追加 `--force`。
 
 输入 JSON 结构如下（`meta` 可省略；数组字段可改为多行字符串）：
 
@@ -105,4 +103,4 @@ python "{技能根目录}/scripts/create_excel_cases.py" \
 }
 ```
 
-`--input-json` 与 `--traceability-matrix` 均为必填参数。`meta.sheet_name` 与命令行 `--sheet-name` 均可设置主工作表名称，前者优先。生成自定义名称的工作簿后，校验命令须追加 `--sheet-name "<相同名称>"`。`生成说明` 工作表由脚本始终创建，`用例数量` 按 `cases` 数组长度自动写入，无需手工填写。
+`--input-json` 与 `--traceability-matrix` 均为必填参数；`--force` 仅在用户确认覆盖已存在文件时使用。`meta.sheet_name` 与命令行 `--sheet-name` 均可设置主工作表名称，前者优先。生成自定义名称的工作簿后，校验命令须追加 `--sheet-name "<相同名称>"`。`生成说明` 工作表由脚本始终创建，`用例数量` 按 `cases` 数组长度自动写入，无需手工填写。`release_date` 无具体日期且用户确认时写 `未指定日期`。

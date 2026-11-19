@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
+import tempfile
 from collections import Counter
+from datetime import date
 from pathlib import Path
 
 from traceability_matrix import (
+    configure_utf8_stderr,
     entries_for_case_title,
     final_matrix_errors,
     load_traceability_matrix,
@@ -28,8 +32,21 @@ CASE_WITH_ID_PATTERN = re.compile(
 )
 CASE_ITEM_PATTERN = re.compile(r"^\s*- \[[ xX]\]\s+([^-]+?)-.*-P[0-4]\s*$")
 NODE_PATTERN = re.compile(r"^(\s*)- \[[ xX]\]\s+")
+LIST_ITEM_PATTERN = re.compile(r"^(\s*)(?:-|\d+\.)\s+\S.*$")
 DESCRIPTION_PATTERN = re.compile(r"^\s*>\s*用例数量[:：]\s*用例\s*(\d+)\s*条\s*$")
-TITLE_PATTERN = re.compile(r"^# 测试用例 - \d{4}-\d{2}-\d{2} - \[.+\]\s*$")
+TITLE_PATTERN = re.compile(r"^# 测试用例 - (?:\d{4}-\d{2}-\d{2}|未指定日期) - \[.+\]\s*$")
+TITLE_DATE_PATTERN = re.compile(r"^# 测试用例 - (\S+) - \[")
+ALLOWED_TEST_TYPES = frozenset(
+    {
+        "功能测试",
+        "回归测试",
+        "性能测试",
+        "安全测试",
+        "兼容性测试",
+        "易用性测试",
+        "可靠性测试",
+    }
+)
 
 
 def validate(
@@ -45,8 +62,16 @@ def validate(
     description_indexes: list[int] = []
 
     if not lines or not TITLE_PATTERN.match(lines[0]):
-        errors.append("文档首行必须为 `# 测试用例 - YYYY-MM-DD - [需求名称]`。")
+        errors.append("文档首行必须为 `# 测试用例 - YYYY-MM-DD - [需求名称]`（无具体日期时用 `未指定日期`）。")
     else:
+        title_date = TITLE_DATE_PATTERN.match(lines[0]).group(1)
+        if title_date != "未指定日期":
+            try:
+                date.fromisoformat(title_date)
+            except ValueError:
+                errors.append(
+                    f"文档标题中的日期“{title_date}”不是有效日历日期，必须为 YYYY-MM-DD。"
+                )
         first_content_after_title = next(
             (index for index, line in enumerate(lines[1:], start=1) if line.strip()),
             None,
@@ -92,6 +117,14 @@ def validate(
             errors.append(f"第 {index + 1} 行的任务清单缩进必须为 2 个空格的层级。")
         elif indent and (not node_stack or node_stack[-1] != indent - 2):
             errors.append(f"第 {index + 1} 行的任务清单必须紧邻上一级节点。")
+        if indent == 2:
+            node_label = line[node.end():].strip()
+            if node_label not in ALLOWED_TEST_TYPES:
+                errors.append(
+                    f"第 {index + 1} 行的测试类型非法，必须为"
+                    "功能测试、回归测试、性能测试、安全测试、兼容性测试、易用性测试、可靠性测试之一，"
+                    f"实际为 '{node_label}'。"
+                )
         if checkbox_case and not CASE_WITH_ID_PATTERN.match(line):
             cases.append((index, checkbox_case.group(2).strip(), indent))
             if indent not in (4, 6) or len(node_stack) < 2:
@@ -148,6 +181,27 @@ def validate(
             field = FIELD_PATTERN.match(line)
             if field and len(field.group(1)) == case_indent + 2:
                 field_names.append(field.group(2))
+            direct_item = LIST_ITEM_PATTERN.match(line)
+            if (
+                direct_item
+                and len(direct_item.group(1)) == case_indent + 2
+                and not field
+            ):
+                direct_content = re.sub(r"^\s*(?:-|\d+\.)\s+", "", line).strip()
+                errors.append(
+                    f"第 {content_index + 1} 行的用例只允许直接包含“前置条件”“测试步骤”“预期结果”字段，"
+                    f"发现非法字段“{direct_content}”。"
+                )
+            elif (
+                line.strip()
+                and len(line) - len(line.lstrip(" ")) == case_indent + 2
+                and not field
+                and not TRACEABILITY_QUOTE_PATTERN.match(line)
+            ):
+                errors.append(
+                    f"第 {content_index + 1} 行的用例只允许直接包含需求追溯引用以及"
+                    f"“前置条件”“测试步骤”“预期结果”字段，发现非法直接内容“{line.strip()}”。"
+                )
             traceability = TRACEABILITY_QUOTE_PATTERN.match(line)
             if traceability and len(traceability.group(1)) == case_indent + 2:
                 traceability_indexes.append(content_index)
@@ -216,7 +270,7 @@ def validate(
             if current.strip() and current_indent <= field_indent and (current.lstrip().startswith("- ") or current.lstrip().startswith("####")):
                 break
             child = CHILD_PATTERN.match(current)
-            if child and len(child.group(1)) > field_indent:
+            if child and len(child.group(1)) == field_indent + 2:
                 items.append(
                     (
                         cursor + 1,
@@ -270,7 +324,7 @@ def fix(text: str) -> str:
             if current.strip() and current_indent <= field_indent and (current.lstrip().startswith("- ") or current.lstrip().startswith("####")):
                 break
             child = CHILD_PATTERN.match(current)
-            if child and len(child.group(1)) > field_indent:
+            if child and len(child.group(1)) == field_indent + 2:
                 item_indexes.append(cursor)
             cursor += 1
 
@@ -286,7 +340,26 @@ def fix(text: str) -> str:
     return "".join(lines)
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
 def main() -> int:
+    configure_utf8_stderr()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, help="Markdown test-case file to validate")
     parser.add_argument(
@@ -315,7 +388,7 @@ def main() -> int:
     if args.fix:
         fixed = fix(text)
         if fixed != text:
-            args.path.write_text(fixed, encoding="utf-8")
+            write_text_atomic(args.path, fixed)
             text = fixed
 
     traceability_matrix, matrix_errors = load_traceability_matrix(args.traceability_matrix)

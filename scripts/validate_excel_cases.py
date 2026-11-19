@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from traceability_matrix import (
+    configure_utf8_stderr,
     entries_for_case_id,
     final_matrix_errors,
     load_traceability_matrix,
@@ -81,7 +82,7 @@ def validate_excel_file(
     try:
         from openpyxl import load_workbook
     except ImportError:
-        return ["缺少 openpyxl 依赖，无法读取和校验 .xlsx 文件，请执行: pip install openpyxl"]
+        return ['缺少 openpyxl 依赖，无法读取和校验 .xlsx 文件，请执行: pip install "openpyxl>=3.1,<4"']
 
     try:
         wb = load_workbook(filename=str(file_path), data_only=False)
@@ -241,6 +242,7 @@ def validate_excel_file(
 
 
 def main() -> None:
+    configure_utf8_stderr()
     parser = argparse.ArgumentParser(description="校验 Excel (.xlsx) 测试用例文件的结构、表头与必填字段。")
     parser.add_argument("path", nargs="?", help="要校验的 .xlsx 文件路径")
     parser.add_argument("--path", dest="opt_path", help="要校验的 .xlsx 文件路径（兼容选项）")

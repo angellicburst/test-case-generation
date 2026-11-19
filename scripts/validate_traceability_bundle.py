@@ -7,7 +7,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from traceability_matrix import final_matrix_errors, load_traceability_matrix
+from traceability_matrix import (
+    configure_utf8_stderr,
+    final_matrix_errors,
+    load_traceability_matrix,
+)
 from validate_excel_cases import validate_excel_file
 from validate_markdown_lists import validate as validate_markdown
 
@@ -79,6 +83,7 @@ def validate_bundle(
 
 
 def main() -> int:
+    configure_utf8_stderr()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--traceability-matrix", type=Path, required=True)
     parser.add_argument("--markdown", type=Path)

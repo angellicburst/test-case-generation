@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,12 @@ REQUIRED_FIELDS = ("id", "source", "location", "rule", "status")
 TRACEABILITY_PATTERN = re.compile(
     r"^\[需求追溯\]\s+来源：(.+?)｜定位：(.+?)｜规则：(.+?)$"
 )
+
+
+def configure_utf8_stderr() -> None:
+    """Write CLI error messages as UTF-8 on Windows and redirected streams."""
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
 
 
 def traceability_text(entry: dict[str, Any]) -> str:
