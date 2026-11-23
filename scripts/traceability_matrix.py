@@ -71,7 +71,7 @@ def load_traceability_matrix(path: str | Path) -> tuple[dict[str, dict[str, Any]
         return {}, [f"需求追溯矩阵不存在: {matrix_path}"]
 
     try:
-        payload = json.loads(matrix_path.read_text(encoding="utf-8"))
+        payload = json.loads(matrix_path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return {}, [f"无法读取需求追溯矩阵: {exc}"]
 
@@ -95,6 +95,17 @@ def load_traceability_matrix(path: str | Path) -> tuple[dict[str, dict[str, Any]
         text_fields = ("source", "location", "rule")
         if not trace_id or any(not str(entry[field]).strip() for field in text_fields):
             errors.append(f"需求追溯矩阵第 {index} 项的 ID、来源、定位和规则不能为空。")
+            continue
+        newline_fields = [
+            field
+            for field in text_fields
+            if "\r" in str(entry[field]).strip() or "\n" in str(entry[field]).strip()
+        ]
+        if newline_fields:
+            errors.append(
+                f"需求追溯矩阵第 {index} 项的 {', '.join(newline_fields)} 不得包含换行，"
+                "请拆分为多个条目。"
+            )
             continue
         if trace_id in result:
             errors.append(f"需求追溯矩阵中的追溯 ID 重复: '{trace_id}'。")

@@ -9,7 +9,6 @@ import re
 import sys
 import tempfile
 from collections import Counter
-from datetime import date
 from pathlib import Path
 
 from traceability_matrix import (
@@ -20,6 +19,7 @@ from traceability_matrix import (
     TRACEABILITY_PATTERN,
     traceability_text,
 )
+from validation_utils import is_valid_date_or_placeholder
 
 FIELD_PATTERN = re.compile(r"^(\s*)- (前置条件|测试步骤|预期结果)\s*$")
 TRACEABILITY_QUOTE_PATTERN = re.compile(r"^(\s*)>\s*(\S.*)$")
@@ -32,6 +32,7 @@ CASE_WITH_ID_PATTERN = re.compile(
 )
 CASE_ITEM_PATTERN = re.compile(r"^\s*- \[[ xX]\]\s+([^-]+?)-.*-P[0-4]\s*$")
 NODE_PATTERN = re.compile(r"^(\s*)- \[[ xX]\]\s+")
+TASK_ITEM_PATTERN = re.compile(r"^(\s*)- \[([^\]]*)\]\s*")
 LIST_ITEM_PATTERN = re.compile(r"^(\s*)(?:-|\d+\.)\s+\S.*$")
 DESCRIPTION_PATTERN = re.compile(r"^\s*>\s*用例数量[:：]\s*用例\s*(\d+)\s*条\s*$")
 TITLE_PATTERN = re.compile(r"^# 测试用例 - (?:\d{4}-\d{2}-\d{2}|未指定日期) - \[.+\]\s*$")
@@ -65,13 +66,10 @@ def validate(
         errors.append("文档首行必须为 `# 测试用例 - YYYY-MM-DD - [需求名称]`（无具体日期时用 `未指定日期`）。")
     else:
         title_date = TITLE_DATE_PATTERN.match(lines[0]).group(1)
-        if title_date != "未指定日期":
-            try:
-                date.fromisoformat(title_date)
-            except ValueError:
-                errors.append(
-                    f"文档标题中的日期“{title_date}”不是有效日历日期，必须为 YYYY-MM-DD。"
-                )
+        if not is_valid_date_or_placeholder(title_date):
+            errors.append(
+                f"文档标题中的日期“{title_date}”不是有效日历日期，必须为 YYYY-MM-DD。"
+            )
         first_content_after_title = next(
             (index for index, line in enumerate(lines[1:], start=1) if line.strip()),
             None,
@@ -105,6 +103,13 @@ def validate(
             )
         if CHECKED_CASE_PATTERN.match(line):
             errors.append(f"第 {index + 1} 行的用例任务项不得使用已勾选状态 `- [x]`。")
+        task_item = TASK_ITEM_PATTERN.match(line)
+        if (
+            task_item
+            and task_item.group(2) != " "
+            and not CHECKED_CASE_PATTERN.match(line)
+        ):
+            errors.append(f"第 {index + 1} 行的任务项状态必须为 `- [ ]`。")
 
         node = NODE_PATTERN.match(line)
         if not node:
@@ -213,6 +218,13 @@ def validate(
                 else:
                     actual_traceability.append(traceability.group(2).strip())
         field_counts = Counter(field_names)
+        if (
+            all(field_counts[field] == 1 for field in ("前置条件", "测试步骤", "预期结果"))
+            and field_names != ["前置条件", "测试步骤", "预期结果"]
+        ):
+            errors.append(
+                f"第 {case_index + 1} 行的用例字段顺序必须为：前置条件 → 测试步骤 → 预期结果。"
+            )
         if not traceability_indexes:
             errors.append(f"第 {case_index + 1} 行的用例标题下缺少需求追溯引用。")
         else:

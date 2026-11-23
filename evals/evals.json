@@ -95,7 +95,7 @@
     },
     {
       "id": "excel-custom-sheet-validation",
-      "prompt": "使用 scripts/create_excel_cases.py 和 meta.sheet_name=自定义生成 Excel 用例，再使用 scripts/validate_excel_cases.py --sheet-name 自定义 校验。",
+      "prompt": "使用 scripts/create_excel_cases.py，在 meta 中填写 requirement_name、release_date 和 sheet_name=自定义 生成 Excel 用例，再使用 scripts/validate_excel_cases.py --sheet-name 自定义 校验。",
       "expected_output": "生成和校验使用相同的主工作表名称，工作簿校验通过。",
       "files": [],
       "expectations": [

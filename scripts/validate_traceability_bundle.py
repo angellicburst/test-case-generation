@@ -114,7 +114,14 @@ def main() -> int:
             print(f"{index}. {error}", file=sys.stderr)
         return 1
 
-    print("追溯总校验通过。")
+    if args.coverage_only:
+        print("追溯覆盖核对通过（未执行 Markdown/Excel 格式校验）。")
+    elif args.markdown is not None and args.excel is not None:
+        print("Markdown、Excel 格式及跨格式覆盖校验通过。")
+    elif args.markdown is not None:
+        print("Markdown 格式与矩阵关联校验通过。")
+    else:
+        print("Excel 格式与矩阵关联校验通过。")
     return 0
 
 

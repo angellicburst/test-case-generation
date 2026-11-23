@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from traceability_matrix import configure_utf8_stderr, load_traceability_matrix, traceability_text
+from validation_utils import is_valid_date_or_placeholder
 
 HEADERS = [
     "需求/追踪 ID",
@@ -110,7 +111,7 @@ def build_info_sheet(workbook: Any, meta: dict[str, Any]) -> None:
     sheet.row_dimensions[1].height = 26
 
     rows = [
-        ("需求名称", meta.get("requirement_name") or meta.get("title", "")),
+        ("需求名称", meta.get("requirement_name", "")),
         ("上线日期", meta.get("release_date", "")),
         ("用例数量", str(meta.get("case_count", ""))),
         ("覆盖范围", normalize_multiline(meta.get("coverage", ""))),
@@ -203,20 +204,53 @@ def build_case_sheet(
     ws.auto_filter.ref = f"A2:K{max(len(cases) + 2, 2)}"
 
 
+def validate_meta(meta: dict[str, Any] | None) -> dict[str, Any]:
+    if meta is None:
+        meta = {}
+    if not isinstance(meta, dict):
+        raise ValueError("'meta' 必须是对象")
+    if "case_count" in meta:
+        raise ValueError("meta.case_count 不得填写，用例数量按 cases 数组长度自动计算。")
+
+    normalized = dict(meta)
+    requirement_name = str(normalized.get("requirement_name") or "").strip()
+    if not requirement_name:
+        raise ValueError("meta.requirement_name 必须为非空字符串。")
+    normalized["requirement_name"] = requirement_name
+
+    release_date = str(normalized.get("release_date") or "").strip()
+    if not release_date:
+        raise ValueError("meta.release_date 必须为非空字符串。")
+    if not is_valid_date_or_placeholder(release_date):
+        raise ValueError("meta.release_date 必须为有效 YYYY-MM-DD 或 未指定日期。")
+    normalized["release_date"] = release_date
+    return normalized
+
+
 def load_cases_payload(input_json: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    payload = json.loads(Path(input_json).read_text(encoding="utf-8"))
+    input_path = Path(input_json)
+    try:
+        payload_text = input_path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"无法读取输入 JSON: {input_path}（{exc}）") from None
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"输入 JSON 格式错误: {input_path}（{exc}）") from None
     if not isinstance(payload, dict):
         raise ValueError("输入 JSON 必须为包含 'cases' 数组的对象")
 
     cases = payload.get("cases", [])
     if not isinstance(cases, list):
         raise ValueError("'cases' 必须是数组")
+    if not cases:
+        raise ValueError("'cases' 必须是非空数组")
 
     meta = payload.get("meta", {})
     if meta is not None and not isinstance(meta, dict):
         raise ValueError("'meta' 必须是对象")
 
-    return meta or {}, cases
+    return validate_meta(meta), cases
 
 
 def build_workbook(
@@ -226,16 +260,21 @@ def build_workbook(
     sheet_name: str = "测试用例",
     meta: dict[str, Any] | None = None,
 ) -> Any:
+    meta = validate_meta(meta)
+    if not cases:
+        raise ValueError("'cases' 必须是非空数组")
+    title_text = str(title).strip()
+    if not title_text:
+        raise ValueError("标题不能为空。")
+    meta["case_count"] = len(cases)
+
     try:
         from openpyxl import Workbook
     except ImportError as exc:
         raise RuntimeError('生成 xlsx 需要 openpyxl 库，请先安装: pip install "openpyxl>=3.1,<4"') from exc
 
     wb = Workbook()
-    build_case_sheet(wb, title, cases, traceability_matrix, sheet_name)
-    meta = meta or {}
-    if "case_count" not in meta:
-        meta["case_count"] = len(cases)
+    build_case_sheet(wb, title_text, cases, traceability_matrix, sheet_name)
     build_info_sheet(wb, meta)
     return wb
 
@@ -269,30 +308,36 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="输出文件已存在时确认覆盖")
     args = parser.parse_args()
 
-    meta, cases = load_cases_payload(args.input_json)
-    traceability_matrix, matrix_errors = load_traceability_matrix(args.traceability_matrix)
-    if matrix_errors:
-        raise SystemExit("\n".join(matrix_errors))
-    title = meta.get("title") or args.title
-    sheet_name = meta.get("sheet_name") or args.sheet_name
+    try:
+        meta, cases = load_cases_payload(args.input_json)
+        traceability_matrix, matrix_errors = load_traceability_matrix(args.traceability_matrix)
+        if matrix_errors:
+            raise SystemExit("\n".join(matrix_errors))
+        title = meta.get("title") or args.title
+        sheet_name = meta.get("sheet_name") or args.sheet_name
+        title_text = str(title).strip()
+        if not title_text:
+            raise ValueError("标题不能为空。")
 
-    output_path = Path(args.output).expanduser().resolve()
-    if output_path.exists() and output_path.is_dir():
-        raise SystemExit("输出路径必须是文件路径，不能是目录")
-    if output_path.exists() and not args.force:
-        raise SystemExit(
-            f"输出文件已存在: {output_path}。确认覆盖后请追加 --force。"
+        output_path = Path(args.output).expanduser().resolve()
+        if output_path.exists() and output_path.is_dir():
+            raise SystemExit("输出路径必须是文件路径，不能是目录")
+        if output_path.exists() and not args.force:
+            raise SystemExit(
+                f"输出文件已存在: {output_path}。确认覆盖后请追加 --force。"
+            )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        workbook = build_workbook(
+            title_text,
+            cases,
+            traceability_matrix,
+            sheet_name=sheet_name,
+            meta=meta,
         )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    workbook = build_workbook(
-        title,
-        cases,
-        traceability_matrix,
-        sheet_name=sheet_name,
-        meta=meta,
-    )
-    save_workbook_atomic(workbook, output_path)
+        save_workbook_atomic(workbook, output_path)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     print(f"成功生成测试用例工作簿: {output_path}")
 
 

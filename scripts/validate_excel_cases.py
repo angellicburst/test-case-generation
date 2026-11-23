@@ -16,6 +16,7 @@ from traceability_matrix import (
     TRACEABILITY_PATTERN,
     traceability_text,
 )
+from validation_utils import is_valid_date_or_placeholder
 
 EXPECTED_HEADERS = [
     "需求/追踪 ID",
@@ -63,6 +64,81 @@ ALLOWED_DESIGN_METHODS = (
     "场景分析法",
 )
 
+INFO_LABELS = ("需求名称", "上线日期", "用例数量", "覆盖范围", "补充说明")
+REQUIRED_INFO_LABELS = ("需求名称", "上线日期", "用例数量")
+COUNT_PATTERN = re.compile(r"[0-9]+")
+
+
+def _cell_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def count_case_rows(ws: object) -> int:
+    count = 0
+    for row_idx in range(3, (ws.max_row or 0) + 1):
+        values = [
+            ws.cell(row=row_idx, column=column).value
+            for column in range(1, len(EXPECTED_HEADERS) + 1)
+        ]
+        if any(value is not None and str(value).strip() for value in values):
+            count += 1
+    return count
+
+
+def validate_info_sheet(workbook: object, expected_count: int) -> list[str]:
+    if "生成说明" not in workbook.sheetnames:
+        return ["工作簿中缺少名为 '生成说明' 的工作表。"]
+
+    info = workbook["生成说明"]
+    errors: list[str] = []
+    label_rows: dict[str, list[int]] = {label: [] for label in INFO_LABELS}
+    for row_idx in range(1, (info.max_row or 0) + 1):
+        label = _cell_text(info.cell(row=row_idx, column=1).value)
+        if label in label_rows:
+            label_rows[label].append(row_idx)
+
+    values: dict[str, str] = {}
+    for label in INFO_LABELS:
+        rows = label_rows[label]
+        if not rows:
+            errors.append(f"生成说明缺少字段“{label}”。")
+        elif len(rows) > 1:
+            errors.append(f"生成说明字段“{label}”重复出现 {len(rows)} 次。")
+        else:
+            values[label] = _cell_text(info.cell(row=rows[0], column=2).value)
+
+    for label in REQUIRED_INFO_LABELS:
+        if label in values and not values[label]:
+            errors.append(f"生成说明字段“{label}”不能为空。")
+
+    release_date = values.get("上线日期")
+    if release_date and not is_valid_date_or_placeholder(release_date):
+        errors.append("生成说明字段“上线日期”必须为有效 YYYY-MM-DD 或 未指定日期。")
+
+    count_text = values.get("用例数量")
+    if count_text:
+        if not COUNT_PATTERN.fullmatch(count_text):
+            errors.append(f"生成说明字段“用例数量”必须为整数，实际为“{count_text}”。")
+        elif int(count_text) != expected_count:
+            errors.append(
+                f"生成说明字段“用例数量”为 {count_text}，"
+                f"与实际用例行数 {expected_count} 不一致。"
+            )
+
+    for row_idx in range(1, (info.max_row or 0) + 1):
+        for column in (1, 2):
+            if info.cell(row=row_idx, column=column).data_type == "f":
+                errors.append(f"生成说明第 {row_idx} 行包含公式，必须使用纯文本。")
+    for row_idx in range(1, (info.max_row or 0) + 1):
+        for column in range(3, (info.max_column or 0) + 1):
+            value = info.cell(row=row_idx, column=column).value
+            if value is not None and str(value).strip():
+                errors.append(
+                    f"生成说明第 {row_idx} 行第 {column} 列存在额外内容，只允许 A–B 两列。"
+                )
+                break
+    return errors
+
 
 def validate_excel_file(
     file_path: Path,
@@ -92,12 +168,31 @@ def validate_excel_file(
     if sheet_name not in wb.sheetnames:
         return [f"工作簿中缺少名为 '{sheet_name}' 的工作表，当前包含的工作表: {wb.sheetnames}"]
 
-    if "生成说明" not in wb.sheetnames:
-        errors.append(
-            f"工作簿中缺少名为 '生成说明' 的工作表，当前包含的工作表: {wb.sheetnames}"
-        )
-
     ws = wb[sheet_name]
+    max_row = ws.max_row or 0
+    actual_case_rows = count_case_rows(ws)
+    max_column = ws.max_column or 0
+
+    a1_text = _cell_text(ws["A1"].value)
+    if not a1_text:
+        errors.append("工作表的 A1 标题不能为空。")
+    if ws.cell(row=1, column=1).data_type == "f":
+        errors.append("第 1 行标题包含公式，必须使用纯文本。")
+    merge_refs = {str(merged) for merged in ws.merged_cells.ranges}
+    if merge_refs != {"A1:K1"}:
+        errors.append("工作表必须恰好包含 A1:K1 合并标题区域，不得存在其他合并区域。")
+
+    if max_column > len(EXPECTED_HEADERS):
+        for row_idx in range(1, max_row + 1):
+            for column in range(len(EXPECTED_HEADERS) + 1, max_column + 1):
+                value = ws.cell(row=row_idx, column=column).value
+                if value is not None and str(value).strip():
+                    errors.append(
+                        f"第 {row_idx} 行第 {column} 列存在额外内容，只允许 A–K 共 11 列。"
+                    )
+                    break
+
+    errors.extend(validate_info_sheet(wb, actual_case_rows))
 
     # 检查第 2 行为列头
     row2_values = [ws.cell(row=2, column=col).value for col in range(1, len(EXPECTED_HEADERS) + 1)]
@@ -107,6 +202,15 @@ def validate_excel_file(
         errors.append(
             f"第 2 行表头不符合规范。\n期望: {EXPECTED_HEADERS}\n实际: {row2_cleaned}"
         )
+    for col_idx in range(1, len(EXPECTED_HEADERS) + 1):
+        if ws.cell(row=2, column=col_idx).data_type == "f":
+            errors.append(
+                f"第 2 行字段“{EXPECTED_HEADERS[col_idx - 1]}”包含公式，必须使用纯文本。"
+            )
+
+    if max_row < 3:
+        errors.append("工作表中未发现有效用例数据行（数据应从第 3 行开始）。")
+        return errors
 
     # 列索引映射
     header_to_col = {header: idx + 1 for idx, header in enumerate(EXPECTED_HEADERS)}
@@ -114,12 +218,7 @@ def validate_excel_file(
     seen_case_ids: set[str] = set()
     seen_titles: set[str] = set()
     actual_case_ids: set[str] = set()
-    valid_rows_count = 0
 
-    max_row = ws.max_row or 0
-    if max_row < 3:
-        errors.append("工作表中未发现有效用例数据行（数据应从第 3 行开始）。")
-        return errors
     if ws.freeze_panes != "A3":
         errors.append("工作表必须冻结窗格至 A3。")
     expected_filter_ref = f"A2:K{max_row}"
@@ -133,8 +232,6 @@ def validate_excel_file(
         row_vals = [ws.cell(row=row_idx, column=c).value for c in range(1, len(EXPECTED_HEADERS) + 1)]
         if not any(v is not None and str(v).strip() != "" for v in row_vals):
             continue  # 跳过全空行
-
-        valid_rows_count += 1
 
         for col_idx in range(1, len(EXPECTED_HEADERS) + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
@@ -226,7 +323,7 @@ def validate_excel_file(
                 f"第 {row_idx} 行设计方法无效: '{design_method}'，必须为 {'、'.join(ALLOWED_DESIGN_METHODS)} 之一。"
             )
 
-    if valid_rows_count == 0:
+    if actual_case_rows == 0:
         errors.append("工作表中未包含任何有效用例数据行。")
     if matrix_finalized:
         for entry in traceability_matrix.values():
@@ -274,4 +371,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

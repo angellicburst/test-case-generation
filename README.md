@@ -46,6 +46,7 @@ test-case-generation/
 ├── scripts/
 │   ├── create_excel_cases.py   # 按 JSON 生成 Excel 工作簿
 │   ├── traceability_matrix.py  # 读取并校验需求追溯矩阵
+│   ├── validation_utils.py     # 生成器与校验器共享的校验工具
 │   ├── validate_markdown_lists.py
 │   ├── validate_excel_cases.py
 │   ├── validate_traceability_bundle.py
@@ -115,7 +116,7 @@ python "{本目录}/scripts/sync_traceability.py" --traceability-matrix "<矩阵
 
 - 通用设计规则（功能点拆分、测试类型、优先级、边界、断言、数据隔离等）见 [测试规则](references/test-rules.md)。
 - Markdown 当前格式要求：`- [ ]` 任务项、用例标题下首个非空行使用 `> [需求追溯] 来源：…｜定位：…｜规则：…` 引用、`> 用例数量: 用例 N 条` 数量声明、用例类型仅 `正向` / `反向`、不得使用 `- [x]` 或 `####` 旧式标题。详见 [Markdown 规范](references/markdown-format.md)。
-- Excel 要求：`测试用例` 与 `生成说明` 两个工作表、11 个标准列头、优先级 `P0`–`P4`、用例 ID 与标题唯一。详见 [Excel 规范](references/excel-format.md)。
+- Excel 要求：`测试用例` 与 `生成说明` 两个工作表、11 个标准列头、优先级 `P0`–`P4`、用例 ID 与标题唯一；生成的 `meta` 必须提供 `requirement_name`、`release_date`，不得填写 `case_count`，`生成说明` 中的用例数量按实际行数自动写入。详见 [Excel 规范](references/excel-format.md)。
 - 追溯矩阵是用例的长期伴随交付物；其中用 `待覆盖`、`已覆盖`、`待确认` 管理覆盖状态。`需求/追踪 ID` 仅填写材料原文的正式编号，未提供则留空。
 
 ## 常见问题
