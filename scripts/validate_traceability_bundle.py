@@ -35,10 +35,14 @@ def validate_coverage(matrix: dict[str, dict[str, object]]) -> list[str]:
         if entry["case_ids"]
     }
     for trace_id in sorted(covered_ids - markdown_ids):
-        errors.append(f"已覆盖追溯项“{trace_id}”缺少 Markdown 用例关联。")
+        errors.append(
+            f"需求追溯矩阵中的已覆盖条目“{trace_id}”缺少 Markdown 用例标题关联。"
+        )
     for trace_id in sorted(covered_ids - excel_ids):
-        errors.append(f"已覆盖追溯项“{trace_id}”缺少 Excel 用例关联。")
-    for trace_id in sorted(markdown_ids ^ excel_ids):
+        errors.append(
+            f"需求追溯矩阵中的已覆盖条目“{trace_id}”缺少 Excel 用例 ID 关联。"
+        )
+    for trace_id in sorted((markdown_ids ^ excel_ids) - covered_ids):
         errors.append(f"追溯项“{trace_id}”在 Markdown 与 Excel 的覆盖不一致。")
     return errors
 

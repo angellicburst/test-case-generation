@@ -36,7 +36,8 @@ def sync_markdown(
     matrix: dict[str, dict[str, Any]],
 ) -> list[str]:
     try:
-        lines = path.read_text(encoding="utf-8-sig").splitlines(keepends=True)
+        with open(path, encoding="utf-8-sig", newline="") as handle:
+            lines = handle.read().splitlines(keepends=True)
     except UnicodeDecodeError as exc:
         return [f"Markdown 文件编码不是 UTF-8: {path}（{exc}）"]
     except OSError as exc:
@@ -95,7 +96,8 @@ def sync_markdown(
 
     if errors:
         return errors
-    path.write_text("".join(lines), encoding="utf-8")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("".join(lines))
     return []
 
 

@@ -44,7 +44,7 @@
 
 用例设计、覆盖与真实性要求遵循 [测试规则](test-rules.md)。Excel 特有要求：
 
-- 前置条件、测试数据与执行步骤的多项内容使用换行有序列表。
+- 前置条件、测试数据、执行步骤与预期结果的多项内容使用换行有序列表。
 - 用例字段按纯文本写入；数据行中出现任何公式均不合规。
 - JSON 中通过 `traceability_refs` 数组关联[需求追溯矩阵](traceability-matrix.md)条目，生成脚本将其渲染到备注开头的连续多行；不得回退使用 `requirement_id` 生成追溯，已有备注保留在后续行。
 
@@ -59,6 +59,10 @@
 - `用例 ID` 必须全局唯一，不得重复。
 - `用例标题` 在同一工作簿中不得重复。
 - `优先级` 必须为 `P0`、`P1`、`P2`、`P3`、`P4` 之一。
+- `用例类型` 必须为字段说明列出的 `功能测试`、`回归测试`、`性能测试`、`安全测试`、`兼容性测试`、`易用性测试`、`可靠性测试` 之一。
+- `设计方法` 必须为字段说明列出的 `等价类划分`、`边界值分析`、`判定表法`、`状态迁移法`、`错误推测法`、`正交试验`、`场景分析法` 之一。
+- 主工作表必须冻结窗格至 `A3`，自动筛选范围必须为 `A2:K{末行}`，覆盖表头与全部数据行。
+- 用例数据行不得包含旧版 `[待确认]` 标记。
 - 生成后必须执行校验脚本进行合规核对：
 
   ```bash
@@ -97,15 +101,15 @@ python "{技能根目录}/scripts/create_excel_cases.py" --output "<输出绝对
       "type": "功能测试",
       "design_method": "等价类划分",
       "priority": "P1",
-      "preconditions": ["前置条件1", "前置条件2"],
+      "preconditions": ["1. 前置条件1", "2. 前置条件2"],
       "test_data": ["测试数据1"],
-      "steps": ["执行步骤1", "执行步骤2"],
-      "expected_results": ["预期结果1", "预期结果2"],
-      "traceability_refs": ["TRACE-001"],
+      "steps": ["1. 执行步骤1", "2. 执行步骤2"],
+      "expected_results": ["1. 预期结果1", "2. 预期结果2"],
+      "traceability_refs": ["TRACE-EXAMPLE-001"],
       "notes": "备注"
     }
   ]
 }
 ```
 
-`--input-json` 与 `--traceability-matrix` 均为必填参数；`--force` 仅在用户确认覆盖已存在文件时使用。`meta.sheet_name` 与命令行 `--sheet-name` 均可设置主工作表名称，前者优先。生成自定义名称的工作簿后，校验命令须追加 `--sheet-name "<相同名称>"`。`meta.requirement_name` 与 `meta.release_date` 必填；`meta.case_count` 不得填写，`生成说明` 中的 `用例数量` 按 `cases` 数组长度自动写入。`release_date` 无具体日期且用户确认时写 `未指定日期`。
+`--input-json` 与 `--traceability-matrix` 均为必填参数；`--force` 仅在用户确认覆盖已存在文件时使用。`meta.sheet_name` 与命令行 `--sheet-name` 均可设置主工作表名称，前者优先。生成自定义名称的工作簿后，校验命令须追加 `--sheet-name "<相同名称>"`。`meta.requirement_name` 与 `meta.release_date` 必填；`meta.case_count` 不得填写，`生成说明` 中的 `用例数量` 按 `cases` 数组长度自动写入。`release_date` 无具体日期且用户确认时写 `未指定日期`。数组字段按元素顺序以换行符拼接，生成器不会自动补序号；多项内容须由输入直接提供 `1. `、`2. ` 等序号，单项可不编号。省略 `meta.title` 与 `--title` 时，大标题默认生成 `测试用例 - {上线日期} - [{需求名称}]`。

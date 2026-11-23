@@ -27,6 +27,8 @@ HEADERS = [
     "备注",
 ]
 
+REQUIREMENTS_FILE = Path(__file__).resolve().parents[1] / "requirements.txt"
+
 DEFAULT_COLUMN_WIDTHS = {
     "A": 18,
     "B": 18,
@@ -115,7 +117,10 @@ def build_info_sheet(workbook: Any, meta: dict[str, Any]) -> None:
         ("上线日期", meta.get("release_date", "")),
         ("用例数量", str(meta.get("case_count", ""))),
         ("覆盖范围", normalize_multiline(meta.get("coverage", ""))),
-        ("补充说明", meta.get("notes") or meta.get("generated_note", "")),
+        (
+            "补充说明",
+            normalize_multiline(meta.get("notes") or meta.get("generated_note", "")),
+        ),
     ]
 
     thin = Side(style="thin", color="B7C3D0")
@@ -271,7 +276,9 @@ def build_workbook(
     try:
         from openpyxl import Workbook
     except ImportError as exc:
-        raise RuntimeError('生成 xlsx 需要 openpyxl 库，请先安装: pip install "openpyxl>=3.1,<4"') from exc
+        raise RuntimeError(
+            f'生成 xlsx 需要 openpyxl 库，请先安装: pip install -r "{REQUIREMENTS_FILE}"'
+        ) from exc
 
     wb = Workbook()
     build_case_sheet(wb, title_text, cases, traceability_matrix, sheet_name)
@@ -301,7 +308,11 @@ def main() -> None:
     configure_utf8_stderr()
     parser = argparse.ArgumentParser(description="生成标准的 .xlsx 格式测试用例工作簿。")
     parser.add_argument("--output", required=True, help="输出 .xlsx 文件绝对路径")
-    parser.add_argument("--title", default="测试用例表", help="第 1 行显示的大标题")
+    parser.add_argument(
+        "--title",
+        default=None,
+        help="第 1 行显示的大标题；省略时按 meta 的上线日期与需求名称生成",
+    )
     parser.add_argument("--sheet-name", default="测试用例", help="主工作表名称")
     parser.add_argument("--input-json", required=True, help="包含 cases 列表与可选 meta 的 JSON 文件路径")
     parser.add_argument("--traceability-matrix", required=True, help="需求追溯矩阵 JSON 文件路径")
@@ -313,7 +324,11 @@ def main() -> None:
         traceability_matrix, matrix_errors = load_traceability_matrix(args.traceability_matrix)
         if matrix_errors:
             raise SystemExit("\n".join(matrix_errors))
-        title = meta.get("title") or args.title
+        title = (
+            meta.get("title")
+            or args.title
+            or f"测试用例 - {meta['release_date']} - [{meta['requirement_name']}]"
+        )
         sheet_name = meta.get("sheet_name") or args.sheet_name
         title_text = str(title).strip()
         if not title_text:
