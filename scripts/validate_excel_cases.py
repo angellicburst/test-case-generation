@@ -64,6 +64,7 @@ ALLOWED_DESIGN_METHODS = (
     "场景分析法",
 )
 
+REQUIREMENTS_FILE = Path(__file__).resolve().parents[1] / "requirements.txt"
 INFO_LABELS = ("需求名称", "上线日期", "用例数量", "覆盖范围", "补充说明")
 REQUIRED_INFO_LABELS = ("需求名称", "上线日期", "用例数量")
 COUNT_PATTERN = re.compile(r"[0-9]+")
@@ -73,16 +74,29 @@ def _cell_text(value: object) -> str:
     return str(value).strip() if value is not None else ""
 
 
+def _row_has_content(ws: object, row_idx: int) -> bool:
+    values = [
+        ws.cell(row=row_idx, column=column).value
+        for column in range(1, len(EXPECTED_HEADERS) + 1)
+    ]
+    return any(value is not None and str(value).strip() for value in values)
+
+
 def count_case_rows(ws: object) -> int:
-    count = 0
-    for row_idx in range(3, (ws.max_row or 0) + 1):
-        values = [
-            ws.cell(row=row_idx, column=column).value
-            for column in range(1, len(EXPECTED_HEADERS) + 1)
-        ]
-        if any(value is not None and str(value).strip() for value in values):
-            count += 1
-    return count
+    return sum(
+        1
+        for row_idx in range(3, (ws.max_row or 0) + 1)
+        if _row_has_content(ws, row_idx)
+    )
+
+
+def last_case_row(ws: object) -> int:
+    indexes = [
+        row_idx
+        for row_idx in range(3, (ws.max_row or 0) + 1)
+        if _row_has_content(ws, row_idx)
+    ]
+    return indexes[-1] if indexes else 2
 
 
 def validate_info_sheet(workbook: object, expected_count: int) -> list[str]:
@@ -158,7 +172,10 @@ def validate_excel_file(
     try:
         from openpyxl import load_workbook
     except ImportError:
-        return ['缺少 openpyxl 依赖，无法读取和校验 .xlsx 文件，请执行: pip install "openpyxl>=3.1,<4"']
+        return [
+            "缺少 openpyxl 依赖，无法读取和校验 .xlsx 文件，请执行: "
+            f'pip install -r "{REQUIREMENTS_FILE}"'
+        ]
 
     try:
         wb = load_workbook(filename=str(file_path), data_only=False)
@@ -221,7 +238,7 @@ def validate_excel_file(
 
     if ws.freeze_panes != "A3":
         errors.append("工作表必须冻结窗格至 A3。")
-    expected_filter_ref = f"A2:K{max_row}"
+    expected_filter_ref = f"A2:K{last_case_row(ws)}"
     if ws.auto_filter.ref != expected_filter_ref:
         errors.append(
             f"工作表筛选范围必须为 {expected_filter_ref}，实际为 {ws.auto_filter.ref or '未设置'}。"
@@ -230,7 +247,7 @@ def validate_excel_file(
     for row_idx in range(3, max_row + 1):
         # 检查该行是否全空
         row_vals = [ws.cell(row=row_idx, column=c).value for c in range(1, len(EXPECTED_HEADERS) + 1)]
-        if not any(v is not None and str(v).strip() != "" for v in row_vals):
+        if not _row_has_content(ws, row_idx):
             continue  # 跳过全空行
 
         for col_idx in range(1, len(EXPECTED_HEADERS) + 1):
@@ -271,20 +288,20 @@ def validate_excel_file(
             errors.append(f"第 {row_idx} 行的多条需求追溯必须连续输出。")
 
         case_id = str(ws.cell(row=row_idx, column=header_to_col["用例 ID"]).value or "").strip()
-        actual_case_ids.add(case_id)
-        matched_entries = entries_for_case_id(traceability_matrix, case_id)
-        expected_traceability = [
-            traceability_text(entry)
-            for entry in matched_entries
-        ]
-        if not matrix_finalized:
-            pass
-        elif not matched_entries:
-            errors.append(
-                f"第 {row_idx} 行用例 ID “{case_id}”未在需求追溯矩阵中关联。"
-            )
-        elif traceability_lines != expected_traceability:
-            errors.append(f"第 {row_idx} 行备注中的需求追溯与矩阵记录不一致。")
+        if case_id:
+            actual_case_ids.add(case_id)
+            matched_entries = entries_for_case_id(traceability_matrix, case_id)
+            expected_traceability = [
+                traceability_text(entry)
+                for entry in matched_entries
+            ]
+            if matrix_finalized:
+                if not matched_entries:
+                    errors.append(
+                        f"第 {row_idx} 行用例 ID “{case_id}”未在需求追溯矩阵中关联。"
+                    )
+                elif traceability_lines != expected_traceability:
+                    errors.append(f"第 {row_idx} 行备注中的需求追溯与矩阵记录不一致。")
 
         # 检查用例 ID
         case_id_val = ws.cell(row=row_idx, column=header_to_col["用例 ID"]).value
@@ -305,7 +322,7 @@ def validate_excel_file(
         # 检查优先级
         priority_val = ws.cell(row=row_idx, column=header_to_col["优先级"]).value
         if priority_val is not None and str(priority_val).strip():
-            p_str = str(priority_val).strip().upper()
+            p_str = str(priority_val).strip()
             if p_str not in ALLOWED_PRIORITIES:
                 errors.append(
                     f"第 {row_idx} 行优先级无效: '{priority_val}'，必须为 {'、'.join(ALLOWED_PRIORITIES)} 之一。"
@@ -329,6 +346,10 @@ def validate_excel_file(
         for entry in traceability_matrix.values():
             if entry["status"] != "已覆盖":
                 continue
+            if not entry["case_ids"]:
+                errors.append(
+                    f"需求追溯矩阵中的已覆盖条目“{entry['id']}”缺少 Excel 用例 ID 关联。"
+                )
             for case_id in entry["case_ids"]:
                 if case_id not in actual_case_ids:
                     errors.append(

@@ -31,6 +31,7 @@ CASE_WITH_ID_PATTERN = re.compile(
     r"^\s*- \[[ xX]\]\s*(?:正向|反向)-TC(?:-[^-]+)?-\d+-.+-P[0-4]\s*$"
 )
 CASE_ITEM_PATTERN = re.compile(r"^\s*- \[[ xX]\]\s+([^-]+?)-.*-P[0-4]\s*$")
+PRIORITY_SUFFIX_PATTERN = re.compile(r"^\s*- \[[ xX]\]\s+.+-P(\d+)\s*$")
 NODE_PATTERN = re.compile(r"^(\s*)- \[[ xX]\]\s+")
 TASK_ITEM_PATTERN = re.compile(r"^(\s*)- \[([^\]]*)\]\s*")
 LIST_ITEM_PATTERN = re.compile(r"^(\s*)(?:-|\d+\.)\s+\S.*$")
@@ -84,6 +85,8 @@ def validate(
             )
 
     for index, line in enumerate(lines):
+        if "[待确认]" in line:
+            errors.append(f"第 {index + 1} 行不得包含旧版“[待确认]”标记。")
         description = DESCRIPTION_PATTERN.match(line)
         if description:
             description_indexes.append(index)
@@ -91,6 +94,12 @@ def validate(
         if case_item and case_item.group(1) not in ("正向", "反向"):
             errors.append(
                 f"第 {index + 1} 行的用例类型非法，必须为 正向 或 反向，实际为 '{case_item.group(1)}'。"
+            )
+        priority_suffix = PRIORITY_SUFFIX_PATTERN.match(line)
+        if priority_suffix and int(priority_suffix.group(1)) > 4:
+            errors.append(
+                f"第 {index + 1} 行的用例优先级非法，必须为 P0、P1、P2、P3、P4 之一，"
+                f"实际为 P{priority_suffix.group(1)}。"
             )
         if LEGACY_CASE_PATTERN.match(line):
             errors.append(
@@ -136,7 +145,11 @@ def validate(
                 errors.append(
                     f"第 {index + 1} 行的用例必须位于功能模块和测试类型的列表项下，缩进为 4 或 6 个空格。"
                 )
-        elif indent == 6:
+        elif (
+            indent == 6
+            and not CASE_ITEM_PATTERN.match(line)
+            and not PRIORITY_SUFFIX_PATTERN.match(line)
+        ):
             errors.append(f"第 {index + 1} 行的 6 空格层级只能用于用例任务项。")
         node_stack.append(indent)
 
@@ -249,8 +262,6 @@ def validate(
                     errors.append(
                         f"第 {case_index + 1} 行的需求追溯与矩阵记录不一致。"
                     )
-        if "[待确认]" in "\n".join(lines[case_index:case_end]):
-            errors.append(f"第 {case_index + 1} 行的用例不得包含旧版“[待确认]”标记。")
         for field in ("前置条件", "测试步骤", "预期结果"):
             if field_counts[field] == 0:
                 errors.append(f"第 {case_index + 1} 行的用例缺少必填字段“{field}”。")
@@ -261,6 +272,10 @@ def validate(
         for entry in traceability_matrix.values():
             if entry["status"] != "已覆盖":
                 continue
+            if not entry["case_titles"]:
+                errors.append(
+                    f"需求追溯矩阵中的已覆盖条目“{entry['id']}”缺少 Markdown 用例标题关联。"
+                )
             for case_title in entry["case_titles"]:
                 if case_title not in actual_case_titles:
                     errors.append(
@@ -359,7 +374,7 @@ def write_text_atomic(path: Path, text: str) -> None:
         dir=str(path.parent),
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
         os.replace(temp_name, path)
     except BaseException:
@@ -392,7 +407,8 @@ def main() -> int:
         return 1
 
     try:
-        text = args.path.read_text(encoding="utf-8-sig")
+        with open(args.path, encoding="utf-8-sig", newline="") as handle:
+            text = handle.read()
     except UnicodeDecodeError as exc:
         print(f"文件编码不是 UTF-8，无法校验: {args.path}（{exc}）", file=sys.stderr)
         return 1

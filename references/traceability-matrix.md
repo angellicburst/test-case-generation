@@ -6,13 +6,13 @@
 {
   "entries": [
     {
-      "id": "TRACE-001",
+      "id": "TRACE-EXAMPLE-001",
       "source": "需求文档.md",
-      "location": "2.1 高危涉诈",
-      "rule": "strategy_code=2204，十分钟线下核验及线下复机",
+      "location": "2.1 示例模块功能",
+      "rule": "输入有效参数后创建成功",
       "status": "已覆盖",
-      "case_ids": ["TC-ONEKF-001"],
-      "case_titles": ["高危涉诈按2204策略处理"]
+      "case_ids": ["TC-MODULE-001"],
+      "case_titles": ["[示例模块]_[示例功能]_[正向场景]_[执行成功]"]
     }
   ]
 }

@@ -42,7 +42,8 @@ test-case-generation/
 │   └── excel-format.md         # Excel 字段、工作簿布局与生成脚本说明
 ├── assets/
 │   ├── md-test-case-template.md
-│   └── excel-test-case-template.xlsx
+│   ├── excel-test-case-template.xlsx
+│   └── example-traceability-matrix.json
 ├── scripts/
 │   ├── create_excel_cases.py   # 按 JSON 生成 Excel 工作簿
 │   ├── traceability_matrix.py  # 读取并校验需求追溯矩阵
@@ -102,7 +103,7 @@ python "{本目录}/scripts/sync_traceability.py" --traceability-matrix "<矩阵
 
 ## 运行环境
 
-- Python 3.12+（最低要求 3.12），按本机命令使用 `python` 或 `python3`。
+- Python 3.10+（最低要求 3.10），按本机命令使用 `python` 或 `python3`。
 - 生成或校验 Excel 需要 `openpyxl`：
 
   ```bash
@@ -140,6 +141,7 @@ python "{本目录}/scripts/sync_traceability.py" --traceability-matrix "<矩阵
 ## 维护约定
 
 - `SKILL.md` 负责流程，`references/` 负责规则与格式，`scripts/` 负责执行；修改规则时同步检查这三处，避免同一规则多处重复。
+- `SKILL.md` 的“交付前检查”是对关键规则的集中复核，规则口径仍以 `references/` 为准。
 - 修改脚本或格式后，至少验证一份当前格式 Markdown 用例、Excel 模板、脚本生成的 Excel 样例；代理行为评测按 `evals/evals.json` 逐条执行并人工复核。
 - README 只维护导航、上手和常见问题。
 
