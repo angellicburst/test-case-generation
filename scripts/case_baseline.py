@@ -885,6 +885,7 @@ def parse_markdown_text(
     used_modules: set[str] = set()
     used_types: set[tuple[str, str]] = set()
     used_groups: set[tuple[str, str, str]] = set()
+    title_line_no: int | None = None
     index = 0
     while index < len(tree_lines):
         raw = tree_lines[index]
@@ -894,9 +895,12 @@ def parse_markdown_text(
         stripped = raw.strip()
         line_no = index + 1
         if stripped.startswith("#"):
+            is_title = stripped.startswith("# ") and stripped[2:].strip() == title
             if stripped.startswith("####"):
                 errors.append(f"第 {line_no} 行：不得使用四级及更深标题。")
-            elif not (stripped.startswith("# ") and stripped[2:].strip() == title):
+            elif is_title and title_line_no is None:
+                title_line_no = line_no
+            else:
                 errors.append(
                     f"第 {line_no} 行：任务树中不得出现标题“{stripped[:30]}”。"
                 )

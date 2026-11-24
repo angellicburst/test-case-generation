@@ -244,6 +244,16 @@ class MarkdownV2Tests(unittest.TestCase):
             "不得使用四级及更深标题",
         )
 
+    def test_duplicate_title_heading_rejected(self):
+        self._assert_error(
+            V2_MARKDOWN.replace(
+                "# 测试用例 - 2026-11-24 - [注册]\n",
+                "# 测试用例 - 2026-11-24 - [注册]\n\n"
+                "# 测试用例 - 2026-11-24 - [注册]\n",
+            ),
+            "任务树中不得出现标题",
+        )
+
     def test_pending_marker_rejected(self):
         self._assert_error(
             V2_MARKDOWN.replace("- 用户未注册。", "- 用户未注册。[待确认]"),
