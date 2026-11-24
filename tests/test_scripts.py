@@ -16,12 +16,28 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from create_excel_cases import build_workbook, save_workbook_atomic  # noqa: E402
-from traceability_matrix import load_traceability_matrix  # noqa: E402
+from traceability_matrix import (  # noqa: E402
+    describe_traceability_mismatch,
+    format_trace_id_list,
+    load_traceability_matrix,
+    parse_trace_id_list,
+    sync_traceability_from_cases,
+    validate_traceability_entries,
+)
 from sync_traceability import _copy_to_temp, sync_atomically, sync_excel, sync_markdown  # noqa: E402
 from validate_excel_cases import validate_excel_file  # noqa: E402
 from validate_markdown_lists import fix, validate  # noqa: E402
 from validate_traceability_bundle import validate_bundle  # noqa: E402
-from validation_utils import is_valid_date_or_placeholder  # noqa: E402
+from validation_utils import (  # noqa: E402
+    FileLockedError,
+    escape_md_table_cell,
+    estimate_row_height,
+    format_excel_multiline,
+    is_valid_date_or_placeholder,
+    normalize_list_items,
+    split_md_table_row,
+    write_text_atomic,
+)
 
 
 VALID_MARKDOWN = """# 测试用例 - 2026-11-17 - [注册]
@@ -684,6 +700,159 @@ class TraceabilityMatrixValidationTests(unittest.TestCase):
                         any("不得包含换行" in error for error in errors),
                         errors,
                     )
+
+
+class TraceabilityAndBaselineTests(unittest.TestCase):
+    COVERED = {
+        "id": "TRACE-A",
+        "source": "需求.md",
+        "location": "1.1 规则",
+        "rule": "规则 A",
+        "status": "已覆盖",
+        "case_ids": ["TC-A-001"],
+    }
+    PENDING = {
+        "id": "TRACE-B",
+        "source": "需求.md",
+        "location": "1.2 规则",
+        "status": "待确认",
+        "issue": "未明确项",
+        "assumption": "当前假设",
+        "question": "确认问题？",
+    }
+
+    def test_validate_entries_accepts_covered_and_pending(self):
+        matrix, errors = validate_traceability_entries(
+            [deepcopy(self.COVERED), deepcopy(self.PENDING)]
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(list(matrix), ["TRACE-A", "TRACE-B"])
+        self.assertEqual(matrix["TRACE-A"]["case_ids"], ["TC-A-001"])
+        self.assertNotIn("rule", matrix["TRACE-B"])
+
+    def test_validate_entries_rejects_legacy_case_titles(self):
+        entry = {**deepcopy(self.COVERED), "case_titles": ["提交合法注册"]}
+        _, errors = validate_traceability_entries([entry])
+        self.assertTrue(any("case_titles" in error for error in errors), errors)
+
+    def test_validate_entries_rejects_invalid_id_characters(self):
+        entry = {**deepcopy(self.COVERED), "id": "TRACE A[1]"}
+        _, errors = validate_traceability_entries([entry])
+        self.assertTrue(any("非法字符" in error for error in errors), errors)
+
+    def test_validate_entries_rejects_duplicate_rule_triple(self):
+        duplicate = {**deepcopy(self.COVERED), "id": "TRACE-A2"}
+        _, errors = validate_traceability_entries([deepcopy(self.COVERED), duplicate])
+        self.assertTrue(any("重复" in error for error in errors), errors)
+
+    def test_validate_entries_rejects_pending_fields_on_covered(self):
+        entry = {**deepcopy(self.COVERED), "issue": "不该出现"}
+        _, errors = validate_traceability_entries([entry])
+        self.assertTrue(any("不得填写待确认字段" in error for error in errors), errors)
+
+    def test_validate_entries_requires_case_ids_for_covered(self):
+        entry = {**deepcopy(self.COVERED), "case_ids": []}
+        _, errors = validate_traceability_entries([entry])
+        self.assertTrue(any("必须至少关联一个用例" in error for error in errors), errors)
+
+    def test_validate_entries_rejects_case_ids_on_pending(self):
+        entry = {**deepcopy(self.PENDING), "case_ids": ["TC-A-001"]}
+        _, errors = validate_traceability_entries([entry])
+        self.assertTrue(any("不得关联用例" in error for error in errors), errors)
+
+    def test_parse_and_format_trace_id_list(self):
+        ids, errors = parse_trace_id_list("TRACE-A, TRACE-B，TRACE-B")
+        self.assertEqual(ids, ["TRACE-A", "TRACE-B"])
+        self.assertTrue(any("重复" in error for error in errors), errors)
+        self.assertEqual(parse_trace_id_list("")[0], [])
+        self.assertEqual(
+            format_trace_id_list([{"id": "TRACE-A"}, "TRACE-B"]),
+            "TRACE-A, TRACE-B",
+        )
+
+    def test_describe_mismatch_covers_all_differences(self):
+        self.assertEqual(describe_traceability_mismatch(["A", "B"], ["A", "B"]), "")
+        self.assertIn(
+            "顺序不一致", describe_traceability_mismatch(["A", "B"], ["B", "A"])
+        )
+        self.assertIn("缺失: B", describe_traceability_mismatch(["A", "B"], ["A"]))
+        self.assertIn("多余: C", describe_traceability_mismatch(["A"], ["A", "C"]))
+
+    def test_sync_upgrades_pending_coverage_in_case_order(self):
+        traceability = [
+            {
+                "id": "TRACE-A",
+                "source": "需求.md",
+                "location": "1.1",
+                "rule": "规则 A",
+                "status": "待覆盖",
+            }
+        ]
+        cases = [
+            {"id": "TC-A-001", "traceability_refs": ["TRACE-A"]},
+            {"id": "TC-A-002", "traceability_refs": ["TRACE-A"]},
+        ]
+        result, errors, warnings = sync_traceability_from_cases(traceability, cases)
+        self.assertEqual(errors, [])
+        self.assertEqual(warnings, [])
+        self.assertEqual(result["TRACE-A"]["status"], "已覆盖")
+        self.assertEqual(result["TRACE-A"]["case_ids"], ["TC-A-001", "TC-A-002"])
+        self.assertEqual(traceability[0]["status"], "待覆盖")
+
+    def test_sync_accepts_matrix_dict_input(self):
+        matrix = {
+            "TRACE-A": {
+                "source": "需求.md",
+                "location": "1.1",
+                "rule": "规则 A",
+                "status": "待覆盖",
+            }
+        }
+        cases = [{"id": "TC-A-001", "traceability_refs": ["TRACE-A"]}]
+        result, errors, warnings = sync_traceability_from_cases(matrix, cases)
+        self.assertEqual(errors, [])
+        self.assertEqual(warnings, [])
+        self.assertEqual(result["TRACE-A"]["status"], "已覆盖")
+
+    def test_sync_strips_status_whitespace_before_settling(self):
+        pending = {**deepcopy(self.PENDING), "status": " 待确认 "}
+        _, errors, _ = sync_traceability_from_cases(
+            [pending], [{"id": "TC-A-001", "traceability_refs": ["TRACE-B"]}]
+        )
+        self.assertTrue(any("不得引用待确认条目" in error for error in errors), errors)
+
+        covering = {
+            "id": "TRACE-A",
+            "source": "需求.md",
+            "location": "1.1",
+            "rule": "规则 A",
+            "status": " 待覆盖 ",
+        }
+        result, errors, _ = sync_traceability_from_cases(
+            [covering], [{"id": "TC-A-001", "traceability_refs": ["TRACE-A"]}]
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(result["TRACE-A"]["status"], "已覆盖")
+
+    def test_describe_mismatch_reports_duplicates_not_order(self):
+        message = describe_traceability_mismatch(["A", "B"], ["A", "B", "B"])
+        self.assertNotIn("顺序不一致", message)
+        self.assertIn("重复项", message)
+
+    def test_sync_blocks_reference_to_pending_entry(self):
+        cases = [{"id": "TC-A-001", "traceability_refs": ["TRACE-B"]}]
+        _, errors, _ = sync_traceability_from_cases(
+            [deepcopy(self.PENDING)], cases
+        )
+        self.assertTrue(any("不得引用待确认条目" in error for error in errors), errors)
+
+    def test_sync_downgrades_coverage_without_cases(self):
+        result, errors, warnings = sync_traceability_from_cases(
+            [deepcopy(self.COVERED)], []
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(result["TRACE-A"]["status"], "待覆盖")
+        self.assertTrue(any("回退为待覆盖" in warning for warning in warnings), warnings)
 
 
 class ExcelTests(unittest.TestCase):
@@ -1804,6 +1973,90 @@ class ValidationUtilsTests(unittest.TestCase):
         for value in ("20261119", "2026-02-30", "2026-1-1", "", None, "2026/11/19"):
             with self.subTest(value=value):
                 self.assertFalse(is_valid_date_or_placeholder(value))
+
+    def test_configure_utf8_stdio_fixes_redirected_streams(self):
+        code = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(ROOT / 'scripts')!r})\n"
+            "from validation_utils import configure_utf8_stdio\n"
+            "configure_utf8_stdio()\n"
+            "print('中文标准输出')\n"
+            "print('中文标准错误', file=sys.stderr)\n"
+        )
+        env = os.environ.copy()
+        for key in ("PYTHONIOENCODING", "PYTHONUTF8"):
+            env.pop(key, None)
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            env=env,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("中文标准输出", result.stdout.decode("utf-8"))
+        self.assertIn("中文标准错误", result.stderr.decode("utf-8"))
+
+    def test_estimate_row_height_uses_tallest_column(self):
+        # Three short cells must not add up; the tallest column decides.
+        self.assertEqual(estimate_row_height(["a", "b", "c"], [40, 40, 40]), 24)
+        self.assertEqual(estimate_row_height(["a\nb"], [40]), 40)
+        self.assertEqual(estimate_row_height([], []), 24)
+
+    def test_estimate_row_height_grows_past_180_and_caps_at_409(self):
+        tall = estimate_row_height(["中" * 300], [44])
+        self.assertGreater(tall, 180)
+        self.assertLessEqual(tall, 409)
+        self.assertEqual(estimate_row_height(["中" * 5000], [44]), 409)
+
+    def test_normalize_list_items_keeps_numeric_prefixes_without_space(self):
+        self.assertEqual(
+            normalize_list_items(["-1+1", "1.5 秒", "+1+1"]),
+            ["-1+1", "1.5 秒", "+1+1"],
+        )
+
+    def test_normalize_list_items_strips_redundant_markers(self):
+        self.assertEqual(
+            normalize_list_items("1. 甲\n2. 乙\n\n- 丙"),
+            ["甲", "乙", "丙"],
+        )
+        self.assertEqual(normalize_list_items(None), [])
+        self.assertEqual(
+            normalize_list_items(["甲", None, "乙"]),
+            ["甲", "乙"],
+        )
+
+    def test_format_excel_multiline_numbers_multiple_items(self):
+        self.assertEqual(format_excel_multiline([]), "")
+        self.assertEqual(format_excel_multiline(["只有一条"]), "只有一条")
+        self.assertEqual(format_excel_multiline(["甲", "乙"]), "1. 甲\n2. 乙")
+        self.assertEqual(format_excel_multiline(["甲", None, "乙"]), "1. 甲\n2. 乙")
+
+    def test_md_table_cells_escape_and_split_pipes(self):
+        self.assertEqual(escape_md_table_cell("a|b"), "a\\|b")
+        self.assertEqual(escape_md_table_cell(None), "")
+        self.assertEqual(split_md_table_row("| a \\| b | c |"), ["a | b", "c"])
+
+    def test_estimate_row_height_normalizes_crlf(self):
+        # Usable width is 38; a trailing "\r" would push this line onto a second row.
+        self.assertEqual(estimate_row_height(["a" * 38 + "\r\nx"], [40]), 40)
+
+    def test_write_text_atomic_reports_lock_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "out.md"
+            target.write_text("old", encoding="utf-8")
+            with mock.patch(
+                "validation_utils.os.replace",
+                side_effect=PermissionError(13, "locked", str(target)),
+            ):
+                with self.assertRaises(FileLockedError) as context:
+                    write_text_atomic(target, "new")
+            self.assertIn("文件被占用", str(context.exception))
+            self.assertIn(str(target), str(context.exception))
+            self.assertEqual(target.read_text(encoding="utf-8"), "old")
+            temp_files = [
+                path for path in Path(directory).iterdir() if path.suffix == ".tmp"
+            ]
+            self.assertEqual(temp_files, [])
 
 
 if __name__ == "__main__":
