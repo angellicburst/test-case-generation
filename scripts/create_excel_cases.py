@@ -11,7 +11,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from case_baseline import load_baseline, normalize_baseline, validate_baseline
+from case_baseline import (
+    canonical_tree_order,
+    load_baseline_raw,
+    normalize_baseline,
+    validate_baseline,
+)
 from traceability_matrix import load_traceability_matrix, traceability_text
 from validation_utils import (
     FileLockedError,
@@ -158,7 +163,8 @@ def build_info_sheet(workbook: Any, meta: dict[str, Any]) -> None:
 
     for row_index, (label, value) in enumerate(rows, start=2):
         label_cell = sheet.cell(row=row_index, column=1, value=label)
-        value_cell = sheet.cell(row=row_index, column=2, value=as_excel_text(value))
+        value_text = as_excel_text(value)
+        value_cell = sheet.cell(row=row_index, column=2, value=value_text)
         value_cell.data_type = "s"
         label_cell.font = Font(name="Microsoft YaHei", bold=True, size=10)
         value_cell.font = Font(name="Microsoft YaHei", size=10)
@@ -167,7 +173,9 @@ def build_info_sheet(workbook: Any, meta: dict[str, Any]) -> None:
         value_cell.border = border
         label_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         value_cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-        sheet.row_dimensions[row_index].height = estimate_row_height([value])
+        sheet.row_dimensions[row_index].height = estimate_text_row_height(
+            [label, value_text], [22, 80]
+        )
 
     sheet.column_dimensions["A"].width = 22
     sheet.column_dimensions["B"].width = 80
@@ -377,7 +385,8 @@ def build_case_sheet_v2(
 
     trace_order = {entry["id"]: index for index, entry in enumerate(traceability)}
     default_order = len(trace_order)
-    for row_index, case in enumerate(cases, start=3):
+    ordered_cases = canonical_tree_order(cases)
+    for row_index, case in enumerate(ordered_cases, start=3):
         refs = sorted(
             case["traceability_refs"], key=lambda ref: trace_order.get(ref, default_order)
         )
@@ -512,7 +521,7 @@ def build_workbook_from_ir(ir: dict[str, Any], sheet_name: str | None = None) ->
     meta = payload["meta"]
     cases = payload["cases"]
     entries = payload["traceability"]
-    resolved_sheet = sheet_name or meta["sheet_name"]
+    resolved_sheet = str(sheet_name or meta["sheet_name"]).strip()
     if resolved_sheet in RESERVED_SHEET_NAMES:
         raise ValueError(f"工作表名不得使用保留名: {'、'.join(RESERVED_SHEET_NAMES)}。")
 
@@ -601,10 +610,12 @@ def main() -> None:
             source = args.baseline or args.input_json
             if not source:
                 raise SystemExit("请通过 --baseline 指定合并 IR 文件。")
-            workbook = build_workbook_from_ir(load_baseline(source), sheet_name=args.sheet_name)
+            workbook = build_workbook_from_ir(
+                load_baseline_raw(source), sheet_name=args.sheet_name
+            )
 
         save_workbook_atomic(workbook, output_path)
-    except ValueError as exc:
+    except (ValueError, FileLockedError, RuntimeError) as exc:
         raise SystemExit(str(exc)) from None
     print(f"成功生成测试用例工作簿: {output_path}")
 

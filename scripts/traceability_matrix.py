@@ -240,6 +240,7 @@ def _normalize_case_ids(value: Any) -> tuple[list[str], list[str]]:
 
 def validate_traceability_entries(
     raw_entries: Any,
+    allow_unassigned_ids: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Validate v2 traceability entries from either an IR array or parsed tables."""
     if isinstance(raw_entries, dict):
@@ -369,7 +370,7 @@ def validate_traceability_entries(
                 )
                 continue
             covered_keys[key] = trace_id
-            if status == "已覆盖" and not case_ids:
+            if status == "已覆盖" and not case_ids and not allow_unassigned_ids:
                 errors.append(
                     f"{label}（{trace_id}）为已覆盖条目，必须至少关联一个用例。"
                 )

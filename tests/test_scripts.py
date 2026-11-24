@@ -16,8 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from case_baseline import (  # noqa: E402
+    _merge_duplicate_entries,
     assign_missing_ids,
     canonical_tree_order,
+    merge_artifacts_to_ir,
     normalize_baseline,
     parse_excel_to_ir,
     parse_markdown_to_ir,
@@ -2131,6 +2133,139 @@ class CaseBaselineTests(unittest.TestCase):
         ]
         self.assertEqual([case["id"] for case in canonical_tree_order(cases)], ["1", "3", "2"])
 
+    def test_canonical_tree_order_nests_groups_like_the_rendered_tree(self):
+        cases = [
+            {"id": "C1", "module": "M1", "type": "功能测试", "group": "G1"},
+            {"id": "C2", "module": "M2", "type": "功能测试", "group": "G1"},
+            {"id": "C3", "module": "M1", "type": "功能测试", "group": "G2"},
+        ]
+        self.assertEqual(
+            [case["id"] for case in canonical_tree_order(cases)], ["C1", "C3", "C2"]
+        )
+
+    def test_markdown_and_excel_render_the_same_case_order(self):
+        ir = valid_ir()
+        template = ir["cases"][0]
+        ir["cases"] = []
+        for index, (module, group) in enumerate(
+            (("M1", "G1"), ("M2", "G1"), ("M1", "G2")), start=1
+        ):
+            case = deepcopy(template)
+            case.update(
+                id=f"TC-ZC-00{index}",
+                module=module,
+                group=group,
+                title=f"用例{index}",
+            )
+            ir["cases"].append(case)
+        ir["traceability"][0]["case_ids"] = ["TC-ZC-001", "TC-ZC-003", "TC-ZC-002"]
+
+        text = render_markdown(normalize_baseline(ir))
+        markdown_order = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("> [TC-"):
+                markdown_order.append(stripped[3 : stripped.index("]")])
+        sheet = build_workbook_from_ir(ir)["测试用例"]
+        excel_order = [
+            sheet.cell(row=row, column=2).value for row in range(3, 6)
+        ]
+        self.assertEqual(markdown_order, ["TC-ZC-001", "TC-ZC-003", "TC-ZC-002"])
+        self.assertEqual(excel_order, markdown_order)
+
+    def test_renumber_keeps_case_ids_in_case_order(self):
+        cases = [
+            {"id": "TC-A-001", "module": "B", "type": "功能测试", "group": ""},
+            {"id": "TC-A-002", "module": "A", "type": "功能测试", "group": ""},
+            {"id": "TC-A-003", "module": "B", "type": "功能测试", "group": ""},
+        ]
+        entries = [
+            {
+                "id": "TRACE-1",
+                "source": "需求.md",
+                "location": "1.1",
+                "rule": "规则",
+                "status": "已覆盖",
+                "case_ids": ["TC-A-001", "TC-A-002", "TC-A-003"],
+            }
+        ]
+        renumber_cases(cases, entries)
+        self.assertEqual(entries[0]["case_ids"], [case["id"] for case in cases])
+
+    def test_merge_with_excel_only_and_unreadable_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            excel = directory_path / "cases.xlsx"
+            save_workbook_atomic(build_workbook_from_ir(valid_ir()), excel)
+
+            merged, errors, _ = merge_artifacts_to_ir(excel_path=excel)
+            self.assertEqual(errors, [])
+            self.assertEqual(merged["cases"][0]["id"], "TC-ZC-001")
+
+            merged, errors, _ = merge_artifacts_to_ir(
+                md_path=directory_path / "missing.md", excel_path=excel
+            )
+            self.assertEqual(merged, {})
+            self.assertTrue(any("无法读取 Markdown" in error for error in errors), errors)
+
+    def test_merge_reports_missing_fields_after_combining_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown = directory_path / "cases.md"
+            excel = directory_path / "cases.xlsx"
+            ir = normalize_baseline(valid_ir())
+            markdown.write_text(render_markdown(ir), encoding="utf-8")
+            save_workbook_atomic(build_workbook_from_ir(valid_ir()), excel)
+
+            _, errors, warnings = merge_artifacts_to_ir(
+                md_path=markdown, excel_path=excel
+            )
+        self.assertEqual(errors, [])
+        self.assertNotIn(
+            "Markdown 不包含设计方法，导出 IR 后需从 Excel 合并或手工补充 design_method。",
+            warnings,
+        )
+        self.assertFalse(
+            any("缺少 design_method" in warning for warning in warnings), warnings
+        )
+        self.assertFalse(
+            any("不包含正向/反向" in warning for warning in warnings), warnings
+        )
+
+    def test_merge_duplicate_entries_only_collapses_the_same_id(self):
+        entries = [
+            {
+                "id": "TRACE-1",
+                "source": "s",
+                "location": "l",
+                "rule": "r",
+                "status": "已覆盖",
+                "case_ids": ["TC-1"],
+            },
+            {
+                "id": "TRACE-2",
+                "source": "s",
+                "location": "l",
+                "rule": "r",
+                "status": "已覆盖",
+                "case_ids": ["TC-2"],
+            },
+            {
+                "id": "TRACE-Q1",
+                "source": "s",
+                "location": "q",
+                "status": "待确认",
+                "issue": "i",
+                "assumption": "a",
+                "question": "q",
+            },
+        ]
+        warnings: list[str] = []
+        merged = _merge_duplicate_entries(entries, warnings)
+        self.assertEqual([entry["id"] for entry in merged], ["TRACE-1", "TRACE-2", "TRACE-Q1"])
+        self.assertNotIn("case_ids", merged[2])
+        self.assertEqual(warnings, [])
+
     def test_markdown_round_trip_preserves_core_fields(self):
         ir = normalize_baseline(valid_ir())
         text = render_markdown(ir)
@@ -2261,6 +2396,179 @@ class CaseBaselineTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(parsed["cases"][0]["traceability_refs"], ["TRACE-REG-001"])
 
+    def test_validate_reads_raw_fields_before_normalizing(self):
+        ir = valid_ir()
+        ir["meta"]["case_count"] = 99
+        self.assertTrue(any("case_count" in error for error in validate_baseline(ir)))
+
+        ir = valid_ir()
+        ir["cases"][0]["traceability_refs"] = ["TRACE-REG-001", "TRACE-REG-001"]
+        self.assertTrue(any("重复项" in error for error in validate_baseline(ir)))
+
+        ir = valid_ir()
+        ir["meta"]["notes"] = "[待确认] 备注"
+        self.assertTrue(
+            any("meta 不得保留" in error for error in validate_baseline(ir))
+        )
+
+        ir = valid_ir()
+        ir["cases"][0]["requirement_id"] = "REQ-1"
+        ir["cases"][0]["notes"] = "旧备注"
+        errors = validate_baseline(ir)
+        self.assertTrue(any("requirement_id" in error for error in errors), errors)
+        self.assertTrue(any("notes" in error for error in errors), errors)
+
+    def test_draft_validation_skips_unassigned_links(self):
+        ir = valid_ir()
+        ir["traceability"][0]["status"] = "待覆盖"
+        ir["traceability"][0]["case_ids"] = []
+        self.assertEqual(
+            validate_baseline(ir, require_finalized_traceability=False), []
+        )
+        self.assertTrue(validate_baseline(ir))
+
+        ir["cases"][0]["id"] = "TC-NEW"
+        self.assertEqual(
+            validate_baseline(
+                ir, require_finalized_traceability=False, allow_unassigned_ids=True
+            ),
+            [],
+        )
+
+    def test_markdown_parser_reports_exact_line_and_merges_sub_items(self):
+        text = (
+            "# 测试用例 - 2026-11-24 - [注册]\n\n"
+            "> 用例数量: 用例 1 条\n\n"
+            "- [ ] 注册模块\n\n"
+            "  - [ ] 功能测试\n\n"
+            "    - [ ] 正向-[注册模块]_[成功]-P0\n\n"
+            "      > [TC-ZC-001] 追溯: TRACE-1\n\n"
+            "      - 前置操作\n\n"
+            "        - 用户未注册。\n\n"
+            "      - 测试步骤\n\n"
+            "        - 提交注册。\n"
+            "          - 补充子项说明。\n\n"
+            "      - 预期结果\n\n"
+            "        - 注册成功。\n\n"
+            "## 需求追溯\n\n"
+            "### 需求追溯表\n\n"
+            "| 追溯 ID | 来源 | 定位 | 规则 | 关联用例 |\n"
+            "| :--- | :--- | :--- | :--- | :--- |\n"
+            "| TRACE-1 | 需求.md | 1.1 | 规则 | TC-ZC-001 |\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.md"
+            path.write_text(text, encoding="utf-8")
+            parsed, errors, warnings = parse_markdown_to_ir(path)
+        self.assertEqual(errors, [])
+        self.assertEqual(parsed["cases"][0]["steps"], ["提交注册。；补充子项说明。"])
+        self.assertTrue(any("第 20 行" in warning for warning in warnings), warnings)
+
+    def test_duplicate_field_does_not_pollute_previous_field(self):
+        base = render_markdown(normalize_baseline(valid_ir()))
+        marker = "      - 预期结果"
+        text = base.replace(
+            marker, "      - 测试步骤\n\n        - 被吞掉的步骤。\n\n" + marker, 1
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.md"
+            path.write_text(text, encoding="utf-8")
+            parsed, errors, _ = parse_markdown_to_ir(path)
+        self.assertTrue(any("重复出现" in error for error in errors), errors)
+        self.assertEqual(parsed["cases"][0]["steps"], ["提交合法手机号。"])
+
+    def test_traceability_section_strictness(self):
+        base = render_markdown(normalize_baseline(valid_ir()))
+        pending_header = (
+            "| 追溯 ID | 来源 | 定位 | 未明确项 | 当前测试假设 | 确认问题 |\n"
+        )
+        empty_separator = (
+            "\n### 待确认项\n\n"
+            + pending_header
+            + "| | | | | | |\n"
+        )
+        empty_table = (
+            "\n### 待确认项\n\n"
+            + pending_header
+            + "| :--- | :--- | :--- | :--- | :--- | :--- |\n"
+        )
+        unknown_heading = "\n### 其他小节\n\n| a | b |\n| - | - |\n"
+        for suffix, expected in (
+            (empty_separator, "缺少标准分隔行"),
+            (empty_table, "表格不得为空"),
+            (unknown_heading, "缺少 ### 需求追溯表"),
+        ):
+            with self.subTest(expected=expected):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "cases.md"
+                    path.write_text(base + suffix, encoding="utf-8")
+                    _, errors, _ = parse_markdown_to_ir(path)
+                self.assertTrue(
+                    any(expected in error for error in errors), errors
+                )
+
+    def test_render_cli_validates_the_raw_ir(self):
+        import render_markdown_cases
+
+        ir = valid_ir()
+        ir["meta"]["case_count"] = 99
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / "ir.json"
+            baseline.write_text(json.dumps(ir, ensure_ascii=False), encoding="utf-8")
+            code = render_markdown_cases.main(
+                ["--baseline", str(baseline), "--output", str(Path(directory) / "c.md")]
+            )
+        self.assertEqual(code, 1)
+
+    def test_clis_report_locked_files_instead_of_raising(self):
+        import case_baseline
+        import create_excel_cases
+        import render_markdown_cases
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            baseline = directory_path / "ir.json"
+            baseline.write_text(
+                json.dumps(valid_ir(), ensure_ascii=False), encoding="utf-8"
+            )
+            locked = FileLockedError("文件被占用，无法写入。")
+
+            with mock.patch.object(
+                render_markdown_cases, "write_text_atomic", side_effect=locked
+            ):
+                self.assertEqual(
+                    render_markdown_cases.main(
+                        [
+                            "--baseline",
+                            str(baseline),
+                            "--output",
+                            str(directory_path / "cases.md"),
+                        ]
+                    ),
+                    1,
+                )
+
+            with mock.patch.object(
+                case_baseline, "write_text_atomic", side_effect=locked
+            ):
+                self.assertEqual(
+                    case_baseline.main(["assign-ids", "--baseline", str(baseline)]), 1
+                )
+
+            argv = [
+                "create_excel_cases.py",
+                "--baseline",
+                str(baseline),
+                "--output",
+                str(directory_path / "cases.xlsx"),
+            ]
+            with mock.patch.object(
+                create_excel_cases, "save_workbook_atomic", side_effect=locked
+            ), mock.patch.object(sys, "argv", argv):
+                with self.assertRaises(SystemExit) as context:
+                    create_excel_cases.main()
+        self.assertIn("文件被占用", str(context.exception))
+
 
 class ExcelV2RenderTests(unittest.TestCase):
     def test_workbook_layout_and_row_heights(self):
@@ -2293,6 +2601,32 @@ class ExcelV2RenderTests(unittest.TestCase):
         height = sheet.row_dimensions[3].height
         self.assertGreaterEqual(height, 24)
         self.assertLessEqual(height, 409)
+
+    def test_formula_like_text_stays_plain_and_real_formulas_are_rejected(self):
+        ir = valid_ir()
+        ir["cases"][0]["test_data"] = ["=1+1"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.xlsx"
+            save_workbook_atomic(build_workbook_from_ir(ir), path)
+            parsed, errors, _ = parse_excel_to_ir(path)
+            self.assertEqual(errors, [])
+            self.assertEqual(parsed["cases"][0]["test_data"], ["=1+1"])
+
+            workbook = build_workbook_from_ir(valid_ir())
+            workbook["测试用例"]["G3"] = "=1+1"
+            save_workbook_atomic(workbook, path)
+            _, errors, _ = parse_excel_to_ir(path)
+        self.assertTrue(any("包含公式" in error for error in errors), errors)
+
+    def test_info_sheet_uses_shared_row_height_and_strips_sheet_name(self):
+        ir = valid_ir()
+        ir["meta"]["coverage"] = "a\nb\nc"
+        workbook = build_workbook_from_ir(ir)
+        self.assertEqual(workbook["生成说明"].row_dimensions[5].height, 56)
+        self.assertEqual(
+            build_workbook_from_ir(valid_ir(), sheet_name=" 测试用例 ").sheetnames[0],
+            "测试用例",
+        )
 
     def test_pending_sheet_is_conditional(self):
         ir = valid_ir()

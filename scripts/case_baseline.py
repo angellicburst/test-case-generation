@@ -23,6 +23,7 @@ from validation_utils import (
     ALLOWED_DESIGN_METHODS,
     ALLOWED_POLARITIES,
     ALLOWED_PRIORITIES,
+    FileLockedError,
     configure_utf8_stdio,
     is_valid_date_or_placeholder,
     normalize_list_items,
@@ -196,6 +197,11 @@ def load_baseline(path: str | Path) -> dict[str, Any]:
     return normalize_baseline(_read_json(path))
 
 
+def load_baseline_raw(path: str | Path) -> Any:
+    """Read the IR JSON without normalizing, so validation can still see rejected fields."""
+    return _read_json(path)
+
+
 def validate_baseline(
     payload: Any,
     require_design_method: bool = False,
@@ -227,8 +233,14 @@ def validate_baseline(
         errors.append(
             f"meta.sheet_name 不得使用保留名: {'、'.join(RESERVED_SHEET_NAMES)}。"
         )
+    if _contains_marker(payload.get("meta")):
+        errors.append("meta 不得保留 [待确认] 标记，请改为待确认条目。")
+    if _contains_marker(payload.get("traceability")):
+        errors.append("traceability 不得保留 [待确认] 标记，请使用 status=待确认 条目。")
 
-    entries, entry_errors = validate_traceability_entries(ir["traceability"])
+    entries, entry_errors = validate_traceability_entries(
+        ir["traceability"], allow_unassigned_ids=allow_unassigned_ids
+    )
     errors.extend(entry_errors)
     if require_finalized_traceability:
         draft = [entry["id"] for entry in entries.values() if entry["status"] == "待覆盖"]
@@ -242,6 +254,25 @@ def validate_baseline(
     cases = ir["cases"]
     if not cases:
         errors.append("cases 必须为非空数组。")
+
+    raw_cases = payload.get("cases")
+    if isinstance(raw_cases, (list, tuple)):
+        for index, raw_case in enumerate(raw_cases, start=1):
+            if not isinstance(raw_case, dict):
+                continue
+            for field, hint in (
+                ("requirement_id", "请改用 traceability_refs"),
+                ("notes", "v2 不保留备注"),
+            ):
+                if field in raw_case:
+                    errors.append(
+                        f"第 {index} 条用例包含 v2 已删除字段 {field}（{hint}）。"
+                    )
+            raw_refs = raw_case.get("traceability_refs")
+            if isinstance(raw_refs, (list, tuple)) and any(
+                item is None or not str(item).strip() for item in raw_refs
+            ):
+                errors.append(f"第 {index} 条用例的 traceability_refs 存在空项。")
 
     seen_ids: set[str] = set()
     seen_titles: set[str] = set()
@@ -317,6 +348,8 @@ def validate_baseline(
             refs = []
         if not refs:
             errors.append(f"{label}（{case_id}）的 traceability_refs 不能为空。")
+        elif len(set(refs)) != len(refs):
+            errors.append(f"{label}（{case_id}）的 traceability_refs 存在重复项。")
         for ref in refs:
             entry = entries.get(ref)
             if entry is None:
@@ -329,15 +362,19 @@ def validate_baseline(
                 errors.append(f"{label}（{case_id}）的 {field} 不得保留 [待确认] 标记。")
 
     expected_links: dict[str, list[str]] = {trace_id: [] for trace_id in entries}
-    for case in cases:
+    for case in canonical_tree_order(cases):
         refs = case["traceability_refs"]
         if not isinstance(refs, list):
+            continue
+        if allow_unassigned_ids and case["id"] in PLACEHOLDER_IDS:
             continue
         for ref in refs:
             if ref in expected_links and case["id"] and case["id"] not in expected_links[ref]:
                 expected_links[ref].append(case["id"])
     for trace_id, entry in entries.items():
         if entry["status"] == "待确认":
+            continue
+        if not require_finalized_traceability and entry["status"] == "待覆盖":
             continue
         diff = describe_traceability_mismatch(entry["case_ids"], expected_links[trace_id])
         if diff:
@@ -389,14 +426,19 @@ def assign_missing_ids(cases: list[dict[str, Any]], id_prefix: str | None = None
 
 
 def canonical_tree_order(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    """Flatten cases in the rendered tree order: module → type → group, each by first appearance."""
+    tree: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = {}
     for case in cases:
-        key = (case.get("module", ""), case.get("type", ""), case.get("group", ""))
-        buckets.setdefault(key, []).append(case)
-    ordered: list[dict[str, Any]] = []
-    for bucket in buckets.values():
-        ordered.extend(bucket)
-    return ordered
+        tree.setdefault(case.get("module", ""), {}).setdefault(
+            case.get("type", ""), {}
+        ).setdefault(case.get("group", ""), []).append(case)
+    return [
+        case
+        for types in tree.values()
+        for groups in types.values()
+        for bucket in groups.values()
+        for case in bucket
+    ]
 
 
 def renumber_cases(
@@ -418,12 +460,15 @@ def renumber_cases(
         mapping[old_id] = new_id
         case["id"] = new_id
 
+    order = {case["id"]: index for index, case in enumerate(cases)}
     entries = traceability.values() if isinstance(traceability, dict) else traceability or []
     for entry in entries:
-        if isinstance(entry, dict):
-            entry["case_ids"] = [
-                mapping.get(case_id, case_id) for case_id in entry.get("case_ids") or []
-            ]
+        if not isinstance(entry, dict) or entry.get("status") == "待确认":
+            continue
+        mapped = [mapping.get(case_id, case_id) for case_id in entry.get("case_ids") or []]
+        entry["case_ids"] = sorted(
+            dict.fromkeys(mapped), key=lambda case_id: order.get(case_id, len(order))
+        )
     return mapping
 
 
@@ -461,6 +506,7 @@ def _parse_fields(
                 name = match.group(1)
                 if name in fields:
                     errors.append(f"第 {line_no} 行：字段“{name}”重复出现。")
+                    current = None
                     continue
                 index = FIELD_ORDER.index(name)
                 if order and index <= FIELD_ORDER.index(order[-1]):
@@ -481,8 +527,10 @@ def _parse_fields(
                     )
                 else:
                     errors.append(f"第 {line_no} 行：未知的直接子字段“{name}”。")
+                current = None
                 continue
             errors.append(f"第 {line_no} 行：用例字段必须使用“- 字段名”格式。")
+            current = None
             continue
 
         if indent < field_indent:
@@ -494,7 +542,7 @@ def _parse_fields(
             continue
 
         item = ITEM_PATTERN.match(stripped)
-        if item:
+        if item and indent == field_indent + 2:
             fields[current].append(item.group(1).strip())
             continue
 
@@ -582,6 +630,7 @@ def _parse_traceability_section(
                 section = "pending"
             else:
                 errors.append(f"需求追溯小节出现未知三级标题“{name}”。")
+                section = None
             index += 1
             continue
         if raw.startswith("#"):
@@ -592,13 +641,15 @@ def _parse_traceability_section(
             errors.append(f"需求追溯小节存在表外内容：{raw.strip()[:30]}")
             index += 1
             continue
-        if section is None:
-            errors.append("需求追溯表格之前缺少 ### 需求追溯表 或 ### 待确认项 标题。")
 
         table_lines: list[str] = []
         while index < len(lines) and lines[index].strip().startswith("|"):
             table_lines.append(lines[index])
             index += 1
+        if section is None:
+            errors.append("需求追溯表格之前缺少 ### 需求追溯表 或 ### 待确认项 标题。")
+            continue
+
         rows = [split_md_table_row(line) for line in table_lines]
         expected = COVERED_HEADERS if section == "covered" else PENDING_HEADERS
         if len(rows) < 2:
@@ -607,13 +658,19 @@ def _parse_traceability_section(
         if tuple(rows[0]) != expected:
             errors.append(f"需求追溯表头必须为：{' | '.join(expected)}。")
             continue
-        if not all(TOKEN_PATTERN.match(cell) for cell in rows[1] if cell != ""):
+        if len(rows[1]) != len(expected) or not all(
+            TOKEN_PATTERN.match(cell) for cell in rows[1]
+        ):
             errors.append("需求追溯表格缺少标准分隔行。")
             continue
+        before = len(entries)
         if section == "covered":
             entries.extend(_parse_covered_table(rows[2:], errors))
         else:
             entries.extend(_parse_pending_table(rows[2:], errors))
+        if len(entries) == before:
+            label = "需求追溯表" if section == "covered" else "待确认项"
+            errors.append(f"{label}表格不得为空。")
     return entries
 
 
@@ -739,6 +796,11 @@ def parse_markdown_to_ir(
                     f"第 {line_no} 行：用例标题下首个非空行必须是引用行“> [TC-ID] 追溯: TRACE-ID”。"
                 )
             else:
+                if _indent_of(block[first_offset]) != case_indent + 2:
+                    errors.append(
+                        f"第 {line_no + first_offset + 1} 行：引用行缩进必须为 "
+                        f"{case_indent + 2} 个空格。"
+                    )
                 case_id = (ref_match.group(1) or "").strip()
                 refs, ref_errors = parse_trace_id_list(ref_match.group(2))
                 errors.extend(f"第 {line_no} 行：{message}" for message in ref_errors)
@@ -752,9 +814,10 @@ def parse_markdown_to_ir(
                         f"第 {line_no} 行：引用行存在占位用例 ID '{case_id}'，请先执行 --assign-ids。"
                     )
 
+            body_start = first_offset + 1 if ref_match is not None else first_offset
             fields = _parse_fields(
-                block[first_offset + 1 :],
-                line_no + first_offset + 1,
+                block[body_start:],
+                line_no + 1 + body_start,
                 case_indent,
                 errors,
                 warnings,
@@ -872,10 +935,11 @@ def _parse_info_sheet(workbook: Any, errors: list[str]) -> dict[str, Any]:
         label = _cell_text(ws.cell(row=row, column=1).value)
         if not label:
             continue
-        value = ws.cell(row=row, column=2).value
-        if isinstance(value, str) and value.startswith("="):
+        value_cell = ws.cell(row=row, column=2)
+        if value_cell.data_type == "f":
             errors.append(f"生成说明第 {row} 行包含公式，必须为纯文本。")
             continue
+        value = value_cell.value
         data[label] = "" if value is None else str(value)
     return {
         "requirement_name": data.get("需求名称", ""),
@@ -895,11 +959,14 @@ def _parse_v2_case_sheet(
 
     cases: list[dict[str, Any]] = []
     for row in range(3, ws.max_row + 1):
-        values = [ws.cell(row=row, column=column).value for column in range(1, len(V2_HEADERS) + 1)]
+        cells = [
+            ws.cell(row=row, column=column) for column in range(1, len(V2_HEADERS) + 1)
+        ]
+        values = [cell.value for cell in cells]
         if all(value is None or str(value).strip() == "" for value in values):
             continue
-        for column, value in enumerate(values, start=1):
-            if isinstance(value, str) and value.startswith("="):
+        for column, cell in enumerate(cells, start=1):
+            if cell.data_type == "f":
                 errors.append(f"主工作表第 {row} 行第 {column} 列包含公式，必须为纯文本。")
         trace_ids, trace_errors = (
             parse_trace_id_list(_cell_text(values[0])) if _cell_text(values[0]) else ([], [])
@@ -1005,9 +1072,15 @@ def _parse_traceability_sheet(
         return []
     entries: list[dict[str, Any]] = []
     for row in range(3, ws.max_row + 1):
-        values = [ws.cell(row=row, column=column).value for column in range(1, len(expected) + 1)]
+        cells = [
+            ws.cell(row=row, column=column) for column in range(1, len(expected) + 1)
+        ]
+        values = [cell.value for cell in cells]
         if all(value is None or str(value).strip() == "" for value in values):
             continue
+        for column, cell in enumerate(cells, start=1):
+            if cell.data_type == "f":
+                errors.append(f"“{ws.title}”第 {row} 行第 {column} 列包含公式，必须为纯文本。")
         if status == "已覆盖":
             trace_ids, case_errors = (
                 parse_trace_id_list(_cell_text(values[4])) if _cell_text(values[4]) else ([], [])
@@ -1041,25 +1114,26 @@ def _parse_traceability_sheet(
 def _merge_duplicate_entries(
     entries: list[dict[str, Any]], warnings: list[str]
 ) -> list[dict[str, Any]]:
-    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
-    order: list[tuple[str, str, str]] = []
+    """Drop rows repeating the same trace ID; conflicting IDs stay for the validator."""
+    by_id: dict[str, dict[str, Any]] = {}
+    result: list[dict[str, Any]] = []
+    dropped = 0
     for entry in entries:
-        if entry["status"] == "待确认":
-            key = (entry["source"], entry["location"], entry["issue"])
-        else:
-            key = (entry["source"], entry["location"], entry["rule"])
-        if key in merged:
-            target = merged[key]
-            for case_id in entry.get("case_ids", []):
-                if case_id not in target["case_ids"]:
-                    target["case_ids"].append(case_id)
+        trace_id = _text(entry.get("id"))
+        if trace_id and trace_id in by_id:
+            target = by_id[trace_id]
+            if entry["status"] != "待确认":
+                for case_id in entry.get("case_ids", []):
+                    if case_id not in target.setdefault("case_ids", []):
+                        target["case_ids"].append(case_id)
+            dropped += 1
             continue
-        merged[key] = dict(entry)
-        merged[key]["case_ids"] = list(entry.get("case_ids", []))
-        order.append(key)
-    if len(order) != len(entries):
-        warnings.append(f"合并了 {len(entries) - len(order)} 条重复的追溯条目。")
-    return [merged[key] for key in order]
+        if trace_id:
+            by_id[trace_id] = entry
+        result.append(entry)
+    if dropped:
+        warnings.append(f"合并了 {dropped} 条重复的追溯条目。")
+    return result
 
 
 def _legacy_entries(matrix: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1190,36 +1264,61 @@ def merge_artifacts_to_ir(
         errors.extend(excel_errors)
         warnings.extend(excel_warnings)
 
-    base = md_ir if primary == "markdown" else excel_ir
-    other = excel_ir if primary == "markdown" else md_ir
-    if base is None:
-        return {}, errors + ["主数据源解析失败。"], warnings
+    if not errors and md_ir is not None and not md_ir:
+        errors.append(f"Markdown 解析失败: {md_path}")
+    if not errors and excel_ir is not None and not excel_ir:
+        errors.append(f"Excel 解析失败: {excel_path}")
+    if errors:
+        return {}, errors, warnings
+
+    if md_ir is not None and excel_ir is not None:
+        base = md_ir if primary == "markdown" else excel_ir
+        other = excel_ir if primary == "markdown" else md_ir
+    elif md_ir is not None:
+        base, other = md_ir, None
+    else:
+        base, other = excel_ir, None
     if other is None:
         return base, errors, warnings
 
     other_cases = {case["id"]: case for case in other["cases"] if case["id"]}
-    missing_design: list[str] = []
     for case in base["cases"]:
         counterpart = other_cases.get(case["id"])
         if counterpart is None:
-            if not case["design_method"]:
-                missing_design.append(case["id"] or "无 ID 用例")
             continue
         if primary == "markdown":
             if not case["design_method"]:
                 case["design_method"] = counterpart["design_method"]
-            _fill_missing_lists(case, counterpart)
         else:
             for field in ("module", "group", "polarity"):
                 if not case[field] and counterpart.get(field):
                     case[field] = counterpart[field]
-            _fill_missing_lists(case, counterpart)
+        _fill_missing_lists(case, counterpart)
 
+    # 单源解析时的通用提示在合并后可能已不成立，按合并结果重算。
+    stale = (
+        "Markdown 不包含设计方法，导出 IR 后需从 Excel 合并或手工补充 design_method。",
+        "Excel 不包含正向/反向信息，请在导出的 IR 中补充 polarity。",
+        "旧版 Excel 不包含正向/反向信息，请在导出的 IR 中补充 polarity。",
+    )
+    warnings[:] = [warning for warning in warnings if warning not in stale]
+    missing_design = [
+        case["id"] or "无 ID 用例" for case in base["cases"] if not case["design_method"]
+    ]
     if missing_design:
         warnings.append(
-            "以下用例在主数据源中缺少 design_method，需补充后才能生成 Excel: "
+            "以下用例缺少 design_method，需补充后才能生成 Excel: "
             + "、".join(missing_design)
         )
+    if primary == "excel":
+        missing_polarity = [
+            case["id"] or "无 ID 用例" for case in base["cases"] if not case["polarity"]
+        ]
+        if missing_polarity:
+            warnings.append(
+                "以下用例缺少 polarity（Excel 不承载该字段），需补充后才能渲染 Markdown: "
+                + "、".join(missing_polarity)
+            )
 
     if primary == "markdown" and excel_ir is not None:
         for field in ("coverage", "notes", "sheet_name"):
@@ -1322,7 +1421,7 @@ def main(argv: list[str] | None = None) -> int:
             _write_ir(Path(args.baseline).expanduser().resolve(), ir, force=True)
             print(f"已重排 {len(mapping)} 条用例 ID。")
             return 0
-    except ValueError as exc:
+    except (ValueError, FileLockedError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 

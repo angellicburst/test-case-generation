@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from case_baseline import canonical_tree_order, load_baseline, validate_baseline
+from case_baseline import (
+    canonical_tree_order,
+    load_baseline_raw,
+    normalize_baseline,
+    validate_baseline,
+)
 from validation_utils import (
     configure_utf8_stdio,
     escape_md_table_cell,
@@ -146,12 +151,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        payload = load_baseline(args.baseline)
+        raw = load_baseline_raw(args.baseline)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
-    errors = validate_baseline(payload, require_design_method=False)
+    errors = validate_baseline(raw, require_design_method=False)
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
@@ -164,8 +169,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"输出文件已存在: {output}。确认覆盖后请追加 --force。", file=sys.stderr)
         return 1
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(output, render_markdown(payload))
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(output, render_markdown(normalize_baseline(raw)))
+    except (OSError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     print(f"成功生成 Markdown 测试用例: {output}")
     return 0
 
