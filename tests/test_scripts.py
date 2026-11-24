@@ -2507,6 +2507,20 @@ class CaseBaselineTests(unittest.TestCase):
                     any(expected in error for error in errors), errors
                 )
 
+    def test_traceability_section_requires_its_tables(self):
+        base = render_markdown(normalize_baseline(valid_ir()))
+        cases = (
+            (base.split("## 需求追溯")[0] + "## 需求追溯\n", "缺少 ### 需求追溯表"),
+            (base + "\n### 待确认项\n", "标题后缺少表格"),
+        )
+        for text, expected in cases:
+            with self.subTest(expected=expected):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "cases.md"
+                    path.write_text(text, encoding="utf-8")
+                    _, errors, _ = parse_markdown_to_ir(path)
+                self.assertTrue(any(expected in error for error in errors), errors)
+
     def test_render_cli_validates_the_raw_ir(self):
         import render_markdown_cases
 
@@ -2625,6 +2639,10 @@ class ExcelV2RenderTests(unittest.TestCase):
         self.assertEqual(workbook["生成说明"].row_dimensions[5].height, 56)
         self.assertEqual(
             build_workbook_from_ir(valid_ir(), sheet_name=" 测试用例 ").sheetnames[0],
+            "测试用例",
+        )
+        self.assertEqual(
+            build_workbook_from_ir(valid_ir(), sheet_name="   ").sheetnames[0],
             "测试用例",
         )
 

@@ -612,10 +612,12 @@ def _parse_pending_table(rows: list[list[str]], errors: list[str]) -> list[dict[
 
 
 def _parse_traceability_section(
-    lines: list[str], errors: list[str]
+    lines: list[str], errors: list[str], require_covered_table: bool = True
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     section: str | None = None
+    awaiting_table: str | None = None
+    saw_covered_table = False
     index = 0
     while index < len(lines):
         raw = lines[index]
@@ -624,10 +626,15 @@ def _parse_traceability_section(
             continue
         if raw.startswith("### "):
             name = raw[4:].strip()
+            if awaiting_table is not None:
+                errors.append(f"“### {awaiting_table}”标题后缺少表格。")
+                awaiting_table = None
             if name == "需求追溯表":
                 section = "covered"
+                awaiting_table = name
             elif name == "待确认项":
                 section = "pending"
+                awaiting_table = name
             else:
                 errors.append(f"需求追溯小节出现未知三级标题“{name}”。")
                 section = None
@@ -646,9 +653,12 @@ def _parse_traceability_section(
         while index < len(lines) and lines[index].strip().startswith("|"):
             table_lines.append(lines[index])
             index += 1
+        awaiting_table = None
         if section is None:
             errors.append("需求追溯表格之前缺少 ### 需求追溯表 或 ### 待确认项 标题。")
             continue
+        if section == "covered":
+            saw_covered_table = True
 
         rows = [split_md_table_row(line) for line in table_lines]
         expected = COVERED_HEADERS if section == "covered" else PENDING_HEADERS
@@ -671,6 +681,10 @@ def _parse_traceability_section(
         if len(entries) == before:
             label = "需求追溯表" if section == "covered" else "待确认项"
             errors.append(f"{label}表格不得为空。")
+    if awaiting_table is not None:
+        errors.append(f"“### {awaiting_table}”标题后缺少表格。")
+    if require_covered_table and not saw_covered_table:
+        errors.append("需求追溯小节缺少 ### 需求追溯表 表格。")
     return entries
 
 
@@ -884,7 +898,9 @@ def parse_markdown_to_ir(
             f"用例数量声明为 {declared_count} 条，实际解析到 {len(cases)} 条。"
         )
 
-    entries = _parse_traceability_section(trace_lines, errors)
+    entries = _parse_traceability_section(
+        trace_lines, errors, require_covered_table=len(separators) == 1
+    )
     if any(not case["design_method"] for case in cases):
         warnings.append(
             "Markdown 不包含设计方法，导出 IR 后需从 Excel 合并或手工补充 design_method。"

@@ -521,7 +521,9 @@ def build_workbook_from_ir(ir: dict[str, Any], sheet_name: str | None = None) ->
     meta = payload["meta"]
     cases = payload["cases"]
     entries = payload["traceability"]
-    resolved_sheet = str(sheet_name or meta["sheet_name"]).strip()
+    resolved_sheet = (
+        str(sheet_name).strip() if sheet_name else ""
+    ) or meta["sheet_name"]
     if resolved_sheet in RESERVED_SHEET_NAMES:
         raise ValueError(f"工作表名不得使用保留名: {'、'.join(RESERVED_SHEET_NAMES)}。")
 
