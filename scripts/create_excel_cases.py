@@ -6,12 +6,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from traceability_matrix import configure_utf8_stderr, load_traceability_matrix, traceability_text
-from validation_utils import is_valid_date_or_placeholder
+from case_baseline import load_baseline, normalize_baseline, validate_baseline
+from traceability_matrix import load_traceability_matrix, traceability_text
+from validation_utils import (
+    FileLockedError,
+    configure_utf8_stdio,
+    estimate_row_height as estimate_text_row_height,
+    format_excel_multiline,
+    is_file_locked_error,
+    is_valid_date_or_placeholder,
+)
 
 HEADERS = [
     "需求/追踪 ID",
@@ -42,6 +51,26 @@ DEFAULT_COLUMN_WIDTHS = {
     "J": 44,
     "K": 26,
 }
+
+V2_HEADERS = (
+    "追溯 ID",
+    "用例 ID",
+    "用例标题",
+    "用例类型",
+    "设计方法",
+    "优先级",
+    "前置操作",
+    "测试数据",
+    "测试步骤",
+    "预期结果",
+    "后置操作",
+)
+V2_COLUMN_WIDTHS = [22, 18, 36, 12, 18, 10, 32, 26, 44, 44, 32]
+TRACE_HEADERS = ("追溯 ID", "来源", "定位", "规则", "关联用例 ID")
+TRACE_COLUMN_WIDTHS = [20, 28, 28, 64, 28]
+PENDING_HEADERS = ("追溯 ID", "来源", "定位", "未明确项", "当前测试假设", "确认问题")
+PENDING_COLUMN_WIDTHS = [20, 26, 26, 32, 32, 36]
+RESERVED_SHEET_NAMES = ("生成说明", "需求追溯", "待确认项")
 
 
 def as_excel_text(value: Any) -> str:
@@ -296,6 +325,17 @@ def save_workbook_atomic(workbook: Any, path: Path) -> None:
     try:
         workbook.save(temp_name)
         os.replace(temp_name, path)
+    except OSError as exc:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        if is_file_locked_error(exc):
+            raise FileLockedError(
+                f"文件被占用，无法写入：{path}。"
+                "请先关闭正在打开该文件的程序（如 Excel、WPS 或编辑器）后重试。"
+            ) from exc
+        raise
     except BaseException:
         try:
             os.unlink(temp_name)
@@ -304,36 +344,222 @@ def save_workbook_atomic(workbook: Any, path: Path) -> None:
         raise
 
 
+def build_case_sheet_v2(
+    workbook: Any,
+    title: str,
+    cases: list[dict[str, Any]],
+    traceability: list[dict[str, Any]],
+    sheet_name: str,
+) -> None:
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    ws = workbook.active
+    ws.title = sheet_name
+
+    ws["A1"] = as_excel_text(title)
+    ws["A1"].data_type = "s"
+    ws.merge_cells("A1:K1")
+    ws["A1"].font = Font(name="Microsoft YaHei", bold=True, size=16)
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    thin = Side(style="thin", color="B7C3D0")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+
+    for index, header in enumerate(V2_HEADERS, start=1):
+        cell = ws.cell(row=2, column=index, value=header)
+        cell.font = Font(name="Microsoft YaHei", bold=True, size=11)
+        cell.fill = header_fill
+        cell.border = border
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[2].height = 24
+
+    trace_order = {entry["id"]: index for index, entry in enumerate(traceability)}
+    default_order = len(trace_order)
+    for row_index, case in enumerate(cases, start=3):
+        refs = sorted(
+            case["traceability_refs"], key=lambda ref: trace_order.get(ref, default_order)
+        )
+        values = [
+            ", ".join(refs),
+            case["id"],
+            case["title"],
+            case["type"],
+            case["design_method"],
+            case["priority"],
+            format_excel_multiline(case["pre_operations"]),
+            format_excel_multiline(case["test_data"]),
+            format_excel_multiline(case["steps"]),
+            format_excel_multiline(case["expected_results"]),
+            format_excel_multiline(case["post_operations"]),
+        ]
+        for column, value in enumerate(values, start=1):
+            cell = ws.cell(row=row_index, column=column, value=as_excel_text(value))
+            cell.font = Font(name="Microsoft YaHei", size=10)
+            cell.data_type = "s"
+            cell.border = border
+            horizontal = "center" if column in (4, 5, 6) else "left"
+            cell.alignment = Alignment(horizontal=horizontal, vertical="top", wrap_text=True)
+        ws.row_dimensions[row_index].height = estimate_text_row_height(
+            values, V2_COLUMN_WIDTHS
+        )
+
+    for index, width in enumerate(V2_COLUMN_WIDTHS, start=1):
+        ws.column_dimensions[chr(64 + index)].width = width
+
+    ws.freeze_panes = "A3"
+    ws.auto_filter.ref = f"A2:K{max(len(cases) + 2, 2)}"
+
+
+def build_traceability_sheet(workbook: Any, entries: list[dict[str, Any]]) -> None:
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    sheet = workbook.create_sheet("需求追溯")
+    sheet["A1"] = "需求追溯表"
+    sheet.merge_cells("A1:E1")
+    sheet["A1"].font = Font(name="Microsoft YaHei", bold=True, size=14)
+    sheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    sheet.row_dimensions[1].height = 26
+
+    thin = Side(style="thin", color="B7C3D0")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+    for index, header in enumerate(TRACE_HEADERS, start=1):
+        cell = sheet.cell(row=2, column=index, value=header)
+        cell.font = Font(name="Microsoft YaHei", bold=True, size=11)
+        cell.fill = header_fill
+        cell.border = border
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    sheet.row_dimensions[2].height = 24
+
+    for row_index, entry in enumerate(entries, start=3):
+        values = [
+            entry["id"],
+            entry["source"],
+            entry["location"],
+            entry["rule"],
+            ", ".join(entry.get("case_ids", [])),
+        ]
+        for column, value in enumerate(values, start=1):
+            cell = sheet.cell(row=row_index, column=column, value=as_excel_text(value))
+            cell.font = Font(name="Microsoft YaHei", size=10)
+            cell.data_type = "s"
+            cell.border = border
+            cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        sheet.row_dimensions[row_index].height = estimate_text_row_height(
+            values, TRACE_COLUMN_WIDTHS
+        )
+
+    for index, width in enumerate(TRACE_COLUMN_WIDTHS, start=1):
+        sheet.column_dimensions[chr(64 + index)].width = width
+    sheet.freeze_panes = "A3"
+    sheet.auto_filter.ref = f"A2:E{max(len(entries) + 2, 2)}"
+
+
+def build_pending_sheet(workbook: Any, entries: list[dict[str, Any]]) -> None:
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    sheet = workbook.create_sheet("待确认项")
+    sheet["A1"] = "待确认项清单"
+    sheet.merge_cells("A1:F1")
+    sheet["A1"].font = Font(name="Microsoft YaHei", bold=True, size=14)
+    sheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    sheet.row_dimensions[1].height = 26
+
+    thin = Side(style="thin", color="B7C3D0")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+    for index, header in enumerate(PENDING_HEADERS, start=1):
+        cell = sheet.cell(row=2, column=index, value=header)
+        cell.font = Font(name="Microsoft YaHei", bold=True, size=11)
+        cell.fill = header_fill
+        cell.border = border
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    sheet.row_dimensions[2].height = 24
+
+    for row_index, entry in enumerate(entries, start=3):
+        values = [
+            entry["id"],
+            entry["source"],
+            entry["location"],
+            entry.get("issue", ""),
+            entry.get("assumption", ""),
+            entry.get("question", ""),
+        ]
+        for column, value in enumerate(values, start=1):
+            cell = sheet.cell(row=row_index, column=column, value=as_excel_text(value))
+            cell.font = Font(name="Microsoft YaHei", size=10)
+            cell.data_type = "s"
+            cell.border = border
+            cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        sheet.row_dimensions[row_index].height = estimate_text_row_height(
+            values, PENDING_COLUMN_WIDTHS
+        )
+
+    for index, width in enumerate(PENDING_COLUMN_WIDTHS, start=1):
+        sheet.column_dimensions[chr(64 + index)].width = width
+    sheet.freeze_panes = "A3"
+    sheet.auto_filter.ref = f"A2:F{max(len(entries) + 2, 2)}"
+
+
+def build_workbook_from_ir(ir: dict[str, Any], sheet_name: str | None = None) -> Any:
+    errors = validate_baseline(ir, require_design_method=True)
+    if errors:
+        raise ValueError("\n".join(errors))
+
+    payload = normalize_baseline(ir)
+    meta = payload["meta"]
+    cases = payload["cases"]
+    entries = payload["traceability"]
+    resolved_sheet = sheet_name or meta["sheet_name"]
+    if resolved_sheet in RESERVED_SHEET_NAMES:
+        raise ValueError(f"工作表名不得使用保留名: {'、'.join(RESERVED_SHEET_NAMES)}。")
+
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:
+        raise RuntimeError(
+            f'生成 xlsx 需要 openpyxl 库，请先安装: pip install -r "{REQUIREMENTS_FILE}"'
+        ) from exc
+
+    workbook = Workbook()
+    build_case_sheet_v2(workbook, meta["title"], cases, entries, resolved_sheet)
+    build_info_sheet(workbook, {**meta, "case_count": len(cases)})
+    build_traceability_sheet(
+        workbook, [entry for entry in entries if entry["status"] != "待确认"]
+    )
+    pending = [entry for entry in entries if entry["status"] == "待确认"]
+    if pending:
+        build_pending_sheet(workbook, pending)
+    return workbook
+
+
 def main() -> None:
-    configure_utf8_stderr()
+    configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="生成标准的 .xlsx 格式测试用例工作簿。")
     parser.add_argument("--output", required=True, help="输出 .xlsx 文件绝对路径")
+    parser.add_argument("--baseline", default=None, help="合并 IR JSON 文件路径（推荐）")
     parser.add_argument(
         "--title",
         default=None,
-        help="第 1 行显示的大标题；省略时按 meta 的上线日期与需求名称生成",
+        help="[旧版输入] 第 1 行显示的大标题；省略时按 meta 的上线日期与需求名称生成",
     )
-    parser.add_argument("--sheet-name", default="测试用例", help="主工作表名称")
-    parser.add_argument("--input-json", required=True, help="包含 cases 列表与可选 meta 的 JSON 文件路径")
-    parser.add_argument("--traceability-matrix", required=True, help="需求追溯矩阵 JSON 文件路径")
+    parser.add_argument("--sheet-name", default=None, help="主工作表名称")
+    parser.add_argument(
+        "--input-json",
+        default=None,
+        help="合并 IR JSON 路径（兼容别名）；与 --traceability-matrix 同用时表示旧版输入",
+    )
+    parser.add_argument(
+        "--traceability-matrix",
+        default=None,
+        help="[已废弃] 旧版需求追溯矩阵 JSON 路径",
+    )
     parser.add_argument("--force", action="store_true", help="输出文件已存在时确认覆盖")
     args = parser.parse_args()
 
     try:
-        meta, cases = load_cases_payload(args.input_json)
-        traceability_matrix, matrix_errors = load_traceability_matrix(args.traceability_matrix)
-        if matrix_errors:
-            raise SystemExit("\n".join(matrix_errors))
-        title = (
-            meta.get("title")
-            or args.title
-            or f"测试用例 - {meta['release_date']} - [{meta['requirement_name']}]"
-        )
-        sheet_name = meta.get("sheet_name") or args.sheet_name
-        title_text = str(title).strip()
-        if not title_text:
-            raise ValueError("标题不能为空。")
-
         output_path = Path(args.output).expanduser().resolve()
         if output_path.exists() and output_path.is_dir():
             raise SystemExit("输出路径必须是文件路径，不能是目录")
@@ -343,13 +569,40 @@ def main() -> None:
             )
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        workbook = build_workbook(
-            title_text,
-            cases,
-            traceability_matrix,
-            sheet_name=sheet_name,
-            meta=meta,
-        )
+        use_legacy = bool(args.input_json and args.traceability_matrix)
+        if use_legacy:
+            print(
+                "警告：--input-json + --traceability-matrix 为旧版输入方式，请改用 --baseline。",
+                file=sys.stderr,
+            )
+            meta, cases = load_cases_payload(args.input_json)
+            traceability_matrix, matrix_errors = load_traceability_matrix(
+                args.traceability_matrix
+            )
+            if matrix_errors:
+                raise SystemExit("\n".join(matrix_errors))
+            title = (
+                meta.get("title")
+                or args.title
+                or f"测试用例 - {meta['release_date']} - [{meta['requirement_name']}]"
+            )
+            title_text = str(title).strip()
+            if not title_text:
+                raise ValueError("标题不能为空。")
+            sheet_name = meta.get("sheet_name") or args.sheet_name or "测试用例"
+            workbook = build_workbook(
+                title_text,
+                cases,
+                traceability_matrix,
+                sheet_name=sheet_name,
+                meta=meta,
+            )
+        else:
+            source = args.baseline or args.input_json
+            if not source:
+                raise SystemExit("请通过 --baseline 指定合并 IR 文件。")
+            workbook = build_workbook_from_ir(load_baseline(source), sheet_name=args.sheet_name)
+
         save_workbook_atomic(workbook, output_path)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None

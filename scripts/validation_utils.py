@@ -15,6 +15,27 @@ from typing import Any
 DATE_PLACEHOLDER = "未指定日期"
 DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+ALLOWED_CASE_TYPES = (
+    "功能测试",
+    "回归测试",
+    "性能测试",
+    "安全测试",
+    "兼容性测试",
+    "易用性测试",
+    "可靠性测试",
+)
+ALLOWED_DESIGN_METHODS = (
+    "等价类划分",
+    "边界值分析",
+    "判定表法",
+    "状态迁移法",
+    "错误推测法",
+    "正交试验",
+    "场景分析法",
+)
+ALLOWED_PRIORITIES = ("P0", "P1", "P2", "P3", "P4")
+ALLOWED_POLARITIES = ("正向", "反向")
+
 LIST_ITEM_PREFIX_PATTERN = re.compile(r"^\s*(?:\d+\.|[-*])\s+")
 DEFAULT_COLUMN_WIDTH = 40
 MIN_ROW_HEIGHT = 24

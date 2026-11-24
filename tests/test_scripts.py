@@ -15,7 +15,21 @@ from openpyxl import load_workbook
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from create_excel_cases import build_workbook, save_workbook_atomic  # noqa: E402
+from case_baseline import (  # noqa: E402
+    assign_missing_ids,
+    canonical_tree_order,
+    normalize_baseline,
+    parse_excel_to_ir,
+    parse_markdown_to_ir,
+    renumber_cases,
+    validate_baseline,
+)
+from create_excel_cases import (  # noqa: E402
+    build_workbook,
+    build_workbook_from_ir,
+    save_workbook_atomic,
+)
+from render_markdown_cases import render_markdown  # noqa: E402
 from traceability_matrix import (  # noqa: E402
     describe_traceability_mismatch,
     format_trace_id_list,
@@ -117,6 +131,48 @@ def valid_meta(**overrides):
     meta = {"requirement_name": "注册需求", "release_date": "未指定日期"}
     meta.update(overrides)
     return meta
+
+
+def valid_ir():
+    return {
+        "schema_version": "2.0",
+        "meta": {
+            "title": "测试用例 - 2026-11-24 - [注册]",
+            "requirement_name": "注册",
+            "release_date": "2026-11-24",
+            "coverage": "覆盖注册主流程",
+            "notes": "基于需求文档生成",
+            "sheet_name": "测试用例",
+        },
+        "traceability": [
+            {
+                "id": "TRACE-REG-001",
+                "source": "注册需求.md",
+                "location": "1.1 手机号",
+                "rule": "手机号必须为11位数字",
+                "status": "已覆盖",
+                "case_ids": ["TC-ZC-001"],
+            }
+        ],
+        "cases": [
+            {
+                "id": "TC-ZC-001",
+                "module": "注册模块",
+                "type": "功能测试",
+                "group": "",
+                "polarity": "正向",
+                "title": "[注册模块]_[注册]_[合法手机号]_[成功]",
+                "design_method": "等价类划分",
+                "priority": "P0",
+                "pre_operations": ["用户未注册。"],
+                "test_data": ["手机号: <测试手机号>"],
+                "steps": ["提交合法手机号。"],
+                "expected_results": ["注册成功。"],
+                "post_operations": ["删除本次注册的账号。"],
+                "traceability_refs": ["TRACE-REG-001"],
+            }
+        ],
+    }
 
 
 def build_valid_workbook(title, cases, matrix, sheet_name="测试用例", **meta_overrides):
@@ -1961,6 +2017,363 @@ class ExcelTests(unittest.TestCase):
         self.assertNotIn("[待确认-", template)
         self.assertNotIn("正式需求编号", template)
         self.assertIn("{材料文件}", template)
+
+
+class CaseBaselineTests(unittest.TestCase):
+    def test_validate_accepts_minimal_ir(self):
+        ir = valid_ir()
+        self.assertEqual(validate_baseline(ir), [])
+        self.assertEqual(validate_baseline(ir, require_design_method=True), [])
+
+    def test_validate_rejects_meta_violations(self):
+        for mutate, expected in (
+            (lambda ir: ir["meta"].update(case_count=1), "case_count"),
+            (lambda ir: ir["meta"].update(requirement_name=" "), "requirement_name"),
+            (lambda ir: ir["meta"].update(release_date="2026-02-30"), "release_date"),
+            (lambda ir: ir["meta"].update(sheet_name="需求追溯"), "保留名"),
+        ):
+            with self.subTest(expected=expected):
+                ir = valid_ir()
+                mutate(ir)
+                self.assertTrue(
+                    any(expected in error for error in validate_baseline(ir)),
+                    validate_baseline(ir),
+                )
+
+    def test_validate_rejects_title_pollution_and_duplicates(self):
+        for title, expected in (
+            ("正向-提交注册", "不得以"),
+            ("提交注册-P1", "不得以"),
+        ):
+            with self.subTest(title=title):
+                ir = valid_ir()
+                ir["cases"][0]["title"] = title
+                self.assertTrue(
+                    any(expected in error for error in validate_baseline(ir)),
+                    validate_baseline(ir),
+                )
+
+        ir = valid_ir()
+        duplicate = deepcopy(ir["cases"][0])
+        duplicate["title"] = "另一个标题"
+        ir["cases"].append(duplicate)
+        ir["traceability"][0]["case_ids"] = ["TC-ZC-001"]
+        self.assertTrue(any("用例 ID 重复" in error for error in validate_baseline(ir)))
+
+    def test_validate_requires_valid_design_method_for_excel(self):
+        ir = valid_ir()
+        ir["cases"][0]["design_method"] = ""
+        self.assertTrue(
+            any("design_method" in error for error in validate_baseline(ir, require_design_method=True))
+        )
+        self.assertFalse(any("design_method" in error for error in validate_baseline(ir)))
+
+        ir = valid_ir()
+        ir["cases"][0]["design_method"] = "判定表"
+        self.assertTrue(
+            any("design_method" in error for error in validate_baseline(ir, require_design_method=True))
+        )
+
+    def test_validate_rejects_pending_reference_and_broken_links(self):
+        ir = valid_ir()
+        ir["traceability"].append(
+            {
+                "id": "TRACE-REG-Q01",
+                "source": "注册需求.md",
+                "location": "1.2 超时",
+                "status": "待确认",
+                "issue": "超时行为未定义",
+                "assumption": "暂按失败处理",
+                "question": "超时是否重试？",
+            }
+        )
+        ir["cases"][0]["traceability_refs"] = ["TRACE-REG-Q01"]
+        errors = validate_baseline(ir)
+        self.assertTrue(any("不得引用待确认条目" in error for error in errors), errors)
+
+        ir = valid_ir()
+        ir["traceability"][0]["case_ids"] = ["TC-ZC-999"]
+        self.assertTrue(any("不一致" in error for error in validate_baseline(ir)))
+
+    def test_assign_ids_preserves_gaps_and_uses_max_plus_one(self):
+        cases = [{"id": "TC-ZC-001"}, {"id": "TC-ZC-003"}, {"id": "TC-NEW"}]
+        assigned = assign_missing_ids(cases)
+        self.assertEqual(assigned, ["TC-ZC-004"])
+        self.assertNotIn("TC-ZC-002", [case["id"] for case in cases])
+
+    def test_renumber_continuous_for_single_prefix_and_buckets_for_multi(self):
+        cases = [{"id": "TC-ZC-005"}, {"id": "TC-ZC-009"}]
+        traceability = [{"id": "TRACE-1", "case_ids": ["TC-ZC-005", "TC-ZC-009"]}]
+        mapping = renumber_cases(cases, traceability)
+        self.assertEqual([case["id"] for case in cases], ["TC-ZC-001", "TC-ZC-002"])
+        self.assertEqual(traceability[0]["case_ids"], ["TC-ZC-001", "TC-ZC-002"])
+        self.assertEqual(mapping["TC-ZC-009"], "TC-ZC-002")
+
+        cases = [
+            {"id": "TC-A-005", "module": "M", "type": "功能测试", "group": ""},
+            {"id": "TC-B-009", "module": "M", "type": "功能测试", "group": ""},
+            {"id": "TC-A-010", "module": "M", "type": "功能测试", "group": ""},
+        ]
+        renumber_cases(cases, [])
+        self.assertEqual(
+            [case["id"] for case in cases], ["TC-A-001", "TC-B-001", "TC-A-002"]
+        )
+
+        cases = [{"id": "TC-A-005", "module": "M", "type": "功能测试", "group": ""}]
+        renumber_cases(cases, [], id_prefix="TC-Z")
+        self.assertEqual(cases[0]["id"], "TC-Z-001")
+
+    def test_canonical_tree_order_groups_by_first_appearance(self):
+        cases = [
+            {"id": "1", "module": "B", "type": "功能测试", "group": ""},
+            {"id": "2", "module": "A", "type": "功能测试", "group": ""},
+            {"id": "3", "module": "B", "type": "功能测试", "group": ""},
+        ]
+        self.assertEqual([case["id"] for case in canonical_tree_order(cases)], ["1", "3", "2"])
+
+    def test_markdown_round_trip_preserves_core_fields(self):
+        ir = normalize_baseline(valid_ir())
+        text = render_markdown(ir)
+        self.assertIn("> [TC-ZC-001] 追溯: TRACE-REG-001", text)
+        self.assertNotIn("### 待确认项", text)
+        self.assertLess(text.index("- 前置操作"), text.index("- 测试数据"))
+        self.assertLess(text.index("- 测试数据"), text.index("- 测试步骤"))
+        self.assertLess(text.index("- 测试步骤"), text.index("- 预期结果"))
+        self.assertLess(text.index("- 预期结果"), text.index("- 后置操作"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.md"
+            path.write_text(text, encoding="utf-8")
+            parsed, errors, _ = parse_markdown_to_ir(path)
+        self.assertEqual(errors, [])
+        original = ir["cases"][0]
+        restored = parsed["cases"][0]
+        for field in (
+            "id",
+            "module",
+            "type",
+            "polarity",
+            "title",
+            "priority",
+            "pre_operations",
+            "test_data",
+            "steps",
+            "expected_results",
+            "post_operations",
+            "traceability_refs",
+        ):
+            self.assertEqual(original[field], restored[field], field)
+        self.assertEqual(parsed["traceability"][0]["case_ids"], ["TC-ZC-001"])
+
+    def test_markdown_render_includes_pending_section(self):
+        ir = valid_ir()
+        ir["traceability"].append(
+            {
+                "id": "TRACE-REG-Q01",
+                "source": "注册需求.md",
+                "location": "1.2 超时",
+                "status": "待确认",
+                "issue": "超时行为未定义",
+                "assumption": "暂按失败处理",
+                "question": "超时是否重试？",
+            }
+        )
+        text = render_markdown(normalize_baseline(ir))
+        self.assertIn("### 待确认项", text)
+        self.assertIn("超时是否重试？", text)
+
+    def test_markdown_parser_merges_continuation_and_warns(self):
+        text = (
+            "# 测试用例 - 2026-11-24 - [注册]\n\n"
+            "> 用例数量: 用例 1 条\n\n"
+            "- [ ] 注册模块\n\n"
+            "  - [ ] 功能测试\n\n"
+            "    - [ ] 正向-[注册模块]_[注册]_[成功]-P0\n\n"
+            "      > [TC-ZC-001] 追溯: TRACE-1\n\n"
+            "      - 前置操作\n\n"
+            "        - 用户未注册。\n\n"
+            "      - 测试步骤\n\n"
+            "        - 提交注册。\n"
+            "          由脚本自动提交。\n\n"
+            "      - 预期结果\n\n"
+            "        - 注册成功。\n\n"
+            "## 需求追溯\n\n"
+            "### 需求追溯表\n\n"
+            "| 追溯 ID | 来源 | 定位 | 规则 | 关联用例 |\n"
+            "| :--- | :--- | :--- | :--- | :--- |\n"
+            "| TRACE-1 | 需求.md | 1.1 | 规则 | TC-ZC-001 |\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.md"
+            path.write_text(text, encoding="utf-8")
+            parsed, errors, warnings = parse_markdown_to_ir(path)
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            parsed["cases"][0]["steps"], ["提交注册。；由脚本自动提交。"]
+        )
+        self.assertTrue(any("合并" in warning for warning in warnings), warnings)
+
+    def test_markdown_parser_rejects_legacy_fields_and_pollution(self):
+        base = render_markdown(normalize_baseline(valid_ir()))
+        cases = (
+            (base.replace("- 测试数据", "- 备注"), "v2 已删除字段"),
+            (base.replace("## 需求追溯", "## 其他小节"), "缺少唯一"),
+            (base.replace("正向-[注册模块]", "正向-TC-ZC-099-[注册模块]"), "不得包含用例 ID"),
+            (base.replace("> [TC-ZC-001] 追溯", "> 追溯"), "缺少用例 ID"),
+        )
+        for text, expected in cases:
+            with self.subTest(expected=expected):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "cases.md"
+                    path.write_text(text, encoding="utf-8")
+                    _, errors, _ = parse_markdown_to_ir(path)
+                self.assertTrue(any(expected in error for error in errors), errors)
+
+    def test_excel_v2_round_trip(self):
+        workbook = build_workbook_from_ir(valid_ir())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.xlsx"
+            save_workbook_atomic(workbook, path)
+            parsed, errors, _ = parse_excel_to_ir(path)
+        self.assertEqual(errors, [])
+        case = parsed["cases"][0]
+        self.assertEqual(case["id"], "TC-ZC-001")
+        self.assertEqual(case["design_method"], "等价类划分")
+        self.assertEqual(case["steps"], ["提交合法手机号。"])
+        self.assertEqual(case["traceability_refs"], ["TRACE-REG-001"])
+        self.assertEqual(case["polarity"], "")
+
+    def test_excel_v1_requires_and_uses_legacy_matrix(self):
+        case = excel_case()
+        workbook = build_workbook(
+            "测试用例", [case], TRACEABILITY_MATRIX, meta=valid_meta()
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "legacy.xlsx"
+            matrix_path = Path(directory) / "matrix.json"
+            save_workbook_atomic(workbook, target)
+            write_matrix(matrix_path, TRACEABILITY_MATRIX)
+            _, errors, _ = parse_excel_to_ir(target)
+            self.assertTrue(any("--legacy-matrix" in error for error in errors), errors)
+            parsed, errors, _ = parse_excel_to_ir(
+                target, legacy_matrix_path=matrix_path
+            )
+        self.assertEqual(errors, [])
+        self.assertEqual(parsed["cases"][0]["traceability_refs"], ["TRACE-REG-001"])
+
+
+class ExcelV2RenderTests(unittest.TestCase):
+    def test_workbook_layout_and_row_heights(self):
+        workbook = build_workbook_from_ir(valid_ir())
+        self.assertEqual(workbook.sheetnames, ["测试用例", "生成说明", "需求追溯"])
+        sheet = workbook["测试用例"]
+        self.assertEqual(
+            [sheet.cell(row=2, column=column).value for column in range(1, 12)],
+            [
+                "追溯 ID",
+                "用例 ID",
+                "用例标题",
+                "用例类型",
+                "设计方法",
+                "优先级",
+                "前置操作",
+                "测试数据",
+                "测试步骤",
+                "预期结果",
+                "后置操作",
+            ],
+        )
+        self.assertEqual(sheet["A3"].value, "TRACE-REG-001")
+        self.assertEqual(sheet["B3"].value, "TC-ZC-001")
+        self.assertEqual(sheet["G3"].value, "用户未注册。")
+        self.assertEqual(sheet.freeze_panes, "A3")
+        self.assertEqual(sheet.auto_filter.ref, "A2:K3")
+        self.assertEqual(sheet.column_dimensions["A"].width, 22)
+        self.assertEqual(sheet["A3"].data_type, "s")
+        height = sheet.row_dimensions[3].height
+        self.assertGreaterEqual(height, 24)
+        self.assertLessEqual(height, 409)
+
+    def test_pending_sheet_is_conditional(self):
+        ir = valid_ir()
+        workbook = build_workbook_from_ir(ir)
+        self.assertNotIn("待确认项", workbook.sheetnames)
+
+        ir["traceability"].append(
+            {
+                "id": "TRACE-REG-Q01",
+                "source": "注册需求.md",
+                "location": "1.2 超时",
+                "status": "待确认",
+                "issue": "超时行为未定义",
+                "assumption": "暂按失败处理",
+                "question": "超时是否重试？",
+            }
+        )
+        workbook = build_workbook_from_ir(ir)
+        self.assertEqual(
+            workbook.sheetnames, ["测试用例", "生成说明", "需求追溯", "待确认项"]
+        )
+        pending = workbook["待确认项"]
+        self.assertEqual(pending["A3"].value, "TRACE-REG-Q01")
+        self.assertEqual(pending["F3"].value, "超时是否重试？")
+
+    def test_reserved_sheet_name_and_missing_design_method_rejected(self):
+        ir = valid_ir()
+        ir["meta"]["sheet_name"] = "需求追溯"
+        with self.assertRaisesRegex(ValueError, "保留名"):
+            build_workbook_from_ir(ir)
+
+        ir = valid_ir()
+        ir["cases"][0]["design_method"] = ""
+        with self.assertRaisesRegex(ValueError, "design_method"):
+            build_workbook_from_ir(ir)
+
+    def test_cli_renders_both_formats_from_ir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            baseline = directory_path / "ir.json"
+            markdown = directory_path / "cases.md"
+            excel = directory_path / "cases.xlsx"
+            baseline.write_text(
+                json.dumps(valid_ir(), ensure_ascii=False), encoding="utf-8"
+            )
+            env = subprocess_env()
+            md_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "render_markdown_cases.py"),
+                    "--baseline",
+                    str(baseline),
+                    "--output",
+                    str(markdown),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+            )
+            self.assertEqual(md_result.returncode, 0, md_result.stderr)
+            xlsx_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "create_excel_cases.py"),
+                    "--baseline",
+                    str(baseline),
+                    "--output",
+                    str(excel),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+            )
+            self.assertEqual(xlsx_result.returncode, 0, xlsx_result.stderr)
+            self.assertIn("TC-ZC-001", markdown.read_text(encoding="utf-8"))
+            self.assertEqual(
+                load_workbook(excel).sheetnames,
+                ["测试用例", "生成说明", "需求追溯"],
+            )
 
 
 class ValidationUtilsTests(unittest.TestCase):
