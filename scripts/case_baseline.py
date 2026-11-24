@@ -207,6 +207,7 @@ def validate_baseline(
     require_design_method: bool = False,
     allow_unassigned_ids: bool = False,
     require_finalized_traceability: bool = True,
+    require_tree_fields: bool = True,
 ) -> list[str]:
     errors: list[str] = []
     if not isinstance(payload, dict):
@@ -291,15 +292,16 @@ def validate_baseline(
                 errors.append(f"用例 ID 重复: '{case_id}'。")
             seen_ids.add(case_id)
 
-        if not case["module"]:
-            errors.append(f"{label}（{case_id or '无 ID'}）的 module 不能为空。")
-        elif _has_newline(case["module"]):
-            errors.append(f"{label}（{case_id}）的 module 不得包含换行。")
+        if require_tree_fields:
+            if not case["module"]:
+                errors.append(f"{label}（{case_id or '无 ID'}）的 module 不能为空。")
+            elif _has_newline(case["module"]):
+                errors.append(f"{label}（{case_id}）的 module 不得包含换行。")
         if case["type"] not in ALLOWED_CASE_TYPES:
             errors.append(
                 f"{label}（{case_id}）的 type 必须为 {'、'.join(ALLOWED_CASE_TYPES)} 之一。"
             )
-        if case["polarity"] not in ALLOWED_POLARITIES:
+        if require_tree_fields and case["polarity"] not in ALLOWED_POLARITIES:
             errors.append(
                 f"{label}（{case_id}）的 polarity 必须为 {' / '.join(ALLOWED_POLARITIES)}。"
             )
@@ -380,6 +382,125 @@ def validate_baseline(
         if diff:
             errors.append(f"追溯条目 '{trace_id}' 的关联用例与正文引用不一致：{diff}")
 
+    return errors
+
+
+CASE_COMPARE_FIELDS = (
+    "id",
+    "title",
+    "type",
+    "priority",
+    "design_method",
+    "pre_operations",
+    "test_data",
+    "steps",
+    "expected_results",
+    "post_operations",
+    "traceability_refs",
+)
+TREE_COMPARE_FIELDS = ("module", "group", "polarity")
+TRACE_COMPARE_FIELDS = ("source", "location", "rule", "issue", "assumption", "question")
+
+
+def _short(value: Any, limit: int = 40) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _trace_signature(entry: dict[str, Any]) -> tuple[str, ...]:
+    signature = [_text(entry.get(field)) for field in TRACE_COMPARE_FIELDS]
+    signature.append("status=" + _text(entry.get("status")))
+    case_ids = ",".join(_text(item) for item in entry.get("case_ids") or [] if _text(item))
+    signature.append("case_ids=" + case_ids)
+    return tuple(signature)
+
+
+def describe_ir_differences(
+    base: Any,
+    other: Any,
+    base_label: str = "Markdown",
+    other_label: str = "Excel",
+    include_tree_fields: bool = True,
+    include_design_method: bool = True,
+) -> list[str]:
+    """Compare two IRs and describe every case and traceability difference.
+
+    ``include_design_method=False`` is used when one side is Markdown, which
+    carries no design method, so the absence is not a real difference.
+    """
+    base_ir = normalize_baseline(base)
+    other_ir = normalize_baseline(other)
+    errors: list[str] = []
+
+    base_ids = [case["id"] for case in base_ir["cases"]]
+    other_ids = [case["id"] for case in other_ir["cases"]]
+    if set(base_ids) != set(other_ids):
+        missing = [case_id for case_id in base_ids if case_id not in other_ids]
+        extra = [case_id for case_id in other_ids if case_id not in base_ids]
+        if missing:
+            errors.append(f"{other_label} 缺少用例: {', '.join(missing)}。")
+        if extra:
+            errors.append(f"{other_label} 多出用例: {', '.join(extra)}。")
+    elif base_ids != other_ids:
+        errors.append(
+            f"用例顺序不一致：{base_label}=[{', '.join(base_ids)}]，"
+            f"{other_label}=[{', '.join(other_ids)}]。"
+        )
+
+    fields = CASE_COMPARE_FIELDS + (TREE_COMPARE_FIELDS if include_tree_fields else ())
+    if not include_design_method:
+        fields = tuple(field for field in fields if field != "design_method")
+    other_cases = {case["id"]: case for case in other_ir["cases"]}
+    for case in base_ir["cases"]:
+        counterpart = other_cases.get(case["id"])
+        if counterpart is None:
+            continue
+        for field in fields:
+            if case[field] != counterpart[field]:
+                errors.append(
+                    f"用例 {case['id']} 的 {field} 不一致："
+                    f"{base_label}={_short(case[field])}，{other_label}={_short(counterpart[field])}。"
+                )
+
+    base_entries = {
+        _text(entry.get("id")): entry
+        for entry in base_ir["traceability"]
+        if isinstance(entry, dict) and _text(entry.get("id"))
+    }
+    other_entries = {
+        _text(entry.get("id")): entry
+        for entry in other_ir["traceability"]
+        if isinstance(entry, dict) and _text(entry.get("id"))
+    }
+    for trace_id in base_entries:
+        if trace_id not in other_entries:
+            errors.append(f"{other_label} 缺少追溯条目: {trace_id}。")
+    for trace_id in other_entries:
+        if trace_id not in base_entries:
+            errors.append(f"{other_label} 多出追溯条目: {trace_id}。")
+    for trace_id, entry in base_entries.items():
+        counterpart = other_entries.get(trace_id)
+        if counterpart is None:
+            continue
+        expected = _trace_signature(entry)
+        actual = _trace_signature(counterpart)
+        if expected != actual:
+            differences = [
+                f"{label}（{base_label}={_short(left)}，{other_label}={_short(right)}）"
+                for label, left, right in zip(
+                    (*TRACE_COMPARE_FIELDS, "status", "case_ids"), expected, actual
+                )
+                if left != right
+            ]
+            errors.append(f"追溯条目 {trace_id} 不一致：{'；'.join(differences)}。")
+
+    base_order = [entry for entry in base_entries]
+    other_order = [entry for entry in other_entries]
+    if set(base_order) == set(other_order) and base_order != other_order:
+        errors.append(
+            f"追溯条目顺序不一致：{base_label}=[{', '.join(base_order)}]，"
+            f"{other_label}=[{', '.join(other_order)}]。"
+        )
     return errors
 
 
@@ -688,16 +809,11 @@ def _parse_traceability_section(
     return entries
 
 
-def parse_markdown_to_ir(
-    md_path: str | Path,
+def parse_markdown_text(
+    text: str,
     allow_unassigned_ids: bool = False,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
-    path = Path(md_path)
-    try:
-        text = path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError) as exc:
-        return {}, [f"无法读取 Markdown 文件: {path}（{exc}）"], []
-
+    """Parse Markdown document text into the merged IR."""
     lines = text.splitlines()
     separators = [i for i, line in enumerate(lines) if re.match(r"^##\s+需求追溯\s*$", line)]
     errors: list[str] = []
@@ -913,6 +1029,18 @@ def parse_markdown_to_ir(
         "cases": cases,
     }
     return ir, errors, warnings
+
+
+def parse_markdown_to_ir(
+    md_path: str | Path,
+    allow_unassigned_ids: bool = False,
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    path = Path(md_path)
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        return {}, [f"无法读取 Markdown 文件: {path}（{exc}）"], []
+    return parse_markdown_text(text, allow_unassigned_ids)
 
 
 # ---------------------------------------------------------------------------

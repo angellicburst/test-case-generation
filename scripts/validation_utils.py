@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unicodedata
@@ -127,6 +128,93 @@ def write_text_atomic(path: str | Path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+def sibling_temp_path(path: str | Path) -> Path:
+    """Create an empty temporary file next to ``path`` for staged output."""
+    target = Path(path)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=target.suffix or ".tmp",
+        dir=str(target.parent),
+    )
+    os.close(fd)
+    return Path(temp_name)
+
+
+def copy_to_temp(path: str | Path) -> Path:
+    """Copy ``path`` to a sibling temporary file, removing it if the copy fails."""
+    source = Path(path)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{source.name}.",
+        suffix=source.suffix or ".tmp",
+        dir=str(source.parent),
+    )
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        shutil.copy2(source, temp_path)
+    except BaseException:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return temp_path
+
+
+def commit_files_atomic(staged: list[tuple[Path, Path]]) -> list[str]:
+    """Replace each target with its staged file, rolling back if a later write fails.
+
+    ``staged`` pairs are ``(target, temp_file)`` in commit order. Each existing
+    target is backed up first; a failed replacement restores everything already
+    committed and returns Chinese error messages. Staged and backup files are
+    always cleaned up.
+    """
+    backups: dict[Path, Path | None] = {}
+    committed: list[Path] = []
+    try:
+        for target, _temp in staged:
+            backups[target] = copy_to_temp(target) if target.exists() else None
+        for target, temp in staged:
+            try:
+                replace_file_atomic(temp, target)
+            except OSError as exc:
+                detail = (
+                    _file_locked_message(target)
+                    if is_file_locked_error(exc)
+                    else str(exc)
+                )
+                messages = [f"写入文件失败: {target}（{detail}）"]
+                for done in reversed(committed):
+                    backup = backups[done]
+                    try:
+                        if backup is None:
+                            done.unlink(missing_ok=True)
+                        else:
+                            os.replace(backup, done)
+                            backups[done] = None
+                    except OSError as rollback_exc:
+                        messages.append(
+                            f"回滚 {done} 失败: {rollback_exc}"
+                            + (f"；备份保留在 {backup}，请手工恢复。" if backup else "。")
+                        )
+                return messages
+            committed.append(target)
+        return []
+    finally:
+        for _target, temp in staged:
+            try:
+                Path(temp).unlink(missing_ok=True)
+            except OSError:
+                pass
+        for backup in backups.values():
+            if backup is None:
+                continue
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def normalize_list_items(value: Any) -> list[str]:

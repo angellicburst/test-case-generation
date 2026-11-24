@@ -1,104 +1,103 @@
 #!/usr/bin/env python3
-"""Validate traceability completeness across Markdown and Excel test-case files."""
+"""Validate Markdown and/or Excel v2 test-case artifacts and their consistency."""
 
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
-from traceability_matrix import (
-    configure_utf8_stderr,
-    final_matrix_errors,
-    load_traceability_matrix,
+from case_baseline import (
+    describe_ir_differences,
+    load_baseline,
+    parse_excel_to_ir,
+    parse_markdown_to_ir,
+    validate_baseline,
 )
 from validate_excel_cases import validate_excel_file
 from validate_markdown_lists import validate as validate_markdown
+from validation_utils import configure_utf8_stdio
 
 
-def validate_coverage(matrix: dict[str, dict[str, object]]) -> list[str]:
-    """Validate that every covered requirement is linked by both formats."""
-    errors = final_matrix_errors(matrix)
-    covered_ids = {
-        entry["id"]
-        for entry in matrix.values()
-        if entry["status"] == "已覆盖"
-    }
-    markdown_ids = {
-        entry["id"]
-        for entry in matrix.values()
-        if entry["case_titles"]
-    }
-    excel_ids = {
-        entry["id"]
-        for entry in matrix.values()
-        if entry["case_ids"]
-    }
-    for trace_id in sorted(covered_ids - markdown_ids):
-        errors.append(
-            f"需求追溯矩阵中的已覆盖条目“{trace_id}”缺少 Markdown 用例标题关联。"
-        )
-    for trace_id in sorted(covered_ids - excel_ids):
-        errors.append(
-            f"需求追溯矩阵中的已覆盖条目“{trace_id}”缺少 Excel 用例 ID 关联。"
-        )
-    for trace_id in sorted((markdown_ids ^ excel_ids) - covered_ids):
-        errors.append(f"追溯项“{trace_id}”在 Markdown 与 Excel 的覆盖不一致。")
-    return errors
+def _read_markdown(path: Path) -> tuple[str, list[str]]:
+    try:
+        return path.read_text(encoding="utf-8-sig"), []
+    except (OSError, UnicodeDecodeError) as exc:
+        return "", [f"无法读取 Markdown 文件: {path}（{exc}）"]
+
+
+def summarize(ir: dict[str, Any]) -> tuple[int, int, int]:
+    entries = [entry for entry in ir.get("traceability") or [] if isinstance(entry, dict)]
+    covered = sum(1 for entry in entries if entry.get("status") == "已覆盖")
+    pending = sum(1 for entry in entries if entry.get("status") == "待确认")
+    return len(ir.get("cases") or []), covered, pending
 
 
 def validate_bundle(
-    matrix_path: Path,
     markdown_path: Path | None = None,
     excel_path: Path | None = None,
+    baseline_path: Path | None = None,
     sheet_name: str = "测试用例",
     coverage_only: bool = False,
 ) -> list[str]:
-    matrix, errors = load_traceability_matrix(matrix_path)
-    if errors:
-        return errors
-    if coverage_only and (markdown_path is None or excel_path is None):
-        return ["仅覆盖核对必须同时提供 Markdown 和 Excel 文件路径。"]
-    if coverage_only:
-        for label, path in (("Markdown", markdown_path), ("Excel", excel_path)):
-            if not path.is_file():
-                errors.append(f"{label} 文件不存在: {path}")
+    """Run self-contained validation and, with both files, cross-format checks."""
+    if markdown_path is None and excel_path is None:
+        return ["必须提供 Markdown 或 Excel 至少一个文件。"]
+
+    errors: list[str] = []
+    if baseline_path is not None:
+        try:
+            baseline = load_baseline(baseline_path)
+        except ValueError as exc:
+            return [str(exc)]
+        errors.extend(validate_baseline(baseline))
         if errors:
             return errors
 
-    if not coverage_only and markdown_path is not None:
-        if not markdown_path.is_file():
-            errors.append(f"Markdown 文件不存在: {markdown_path}")
-        else:
-            try:
-                markdown_text = markdown_path.read_text(encoding="utf-8-sig")
-            except UnicodeDecodeError as exc:
-                errors.append(f"Markdown 文件编码不是 UTF-8: {markdown_path}（{exc}）")
-            else:
-                errors.extend(validate_markdown(markdown_text, matrix))
-
-    if not coverage_only and excel_path is not None:
-        errors.extend(validate_excel_file(excel_path, matrix, sheet_name=sheet_name))
+    if not coverage_only:
+        if markdown_path is not None:
+            text, read_errors = _read_markdown(markdown_path)
+            errors.extend(read_errors)
+            if not read_errors:
+                errors.extend(validate_markdown(text))
+        if excel_path is not None:
+            errors.extend(validate_excel_file(excel_path, sheet_name=sheet_name))
 
     if markdown_path is not None and excel_path is not None:
-        errors.extend(validate_coverage(matrix))
+        markdown_ir, markdown_errors, _ = parse_markdown_to_ir(markdown_path)
+        excel_ir, excel_errors, _ = parse_excel_to_ir(excel_path, sheet_name=sheet_name)
+        if coverage_only:
+            errors.extend(markdown_errors)
+            errors.extend(excel_errors)
+        if markdown_ir and excel_ir:
+            errors.extend(
+                describe_ir_differences(
+                    markdown_ir,
+                    excel_ir,
+                    "Markdown",
+                    "Excel",
+                    include_tree_fields=False,
+                    include_design_method=False,
+                )
+            )
 
     return list(dict.fromkeys(errors))
 
 
-def main() -> int:
-    configure_utf8_stderr()
+def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--traceability-matrix", type=Path, required=True)
-    parser.add_argument("--markdown", type=Path)
-    parser.add_argument("--excel", type=Path)
-    parser.add_argument("--sheet-name", default="测试用例")
+    parser.add_argument("--markdown", type=Path, help="Markdown 测试用例文件")
+    parser.add_argument("--excel", type=Path, help="Excel 测试用例文件")
+    parser.add_argument("--baseline", type=Path, help="可选的合并 IR，用于额外自校验")
+    parser.add_argument("--sheet-name", default="测试用例", help="Excel 主工作表名")
     parser.add_argument(
         "--coverage-only",
         action="store_true",
-        help="仅核对矩阵的 Markdown/Excel 覆盖关联，依赖两种格式已分别校验通过。",
+        help="跳过格式细节，仅核对两种格式的用例与追溯是否一致",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.markdown is None and args.excel is None:
         parser.error("至少提供 --markdown 或 --excel 之一。")
@@ -106,26 +105,25 @@ def main() -> int:
         parser.error("--coverage-only 必须同时提供 --markdown 和 --excel。")
 
     errors = validate_bundle(
-        args.traceability_matrix,
         markdown_path=args.markdown,
         excel_path=args.excel,
+        baseline_path=args.baseline,
         sheet_name=args.sheet_name,
         coverage_only=args.coverage_only,
     )
     if errors:
-        print(f"追溯总校验失败: 发现 {len(errors)} 处错误:\n", file=sys.stderr)
+        print(f"追溯总校验失败: 发现 {len(errors)} 处错误:", file=sys.stderr)
         for index, error in enumerate(errors, start=1):
             print(f"{index}. {error}", file=sys.stderr)
         return 1
 
-    if args.coverage_only:
-        print("追溯覆盖核对通过（未执行 Markdown/Excel 格式校验）。")
-    elif args.markdown is not None and args.excel is not None:
-        print("Markdown、Excel 格式及跨格式覆盖校验通过。")
-    elif args.markdown is not None:
-        print("Markdown 格式与矩阵关联校验通过。")
-    else:
-        print("Excel 格式与矩阵关联校验通过。")
+    ir: dict[str, Any] = {}
+    if args.markdown is not None:
+        ir, _, _ = parse_markdown_to_ir(args.markdown)
+    elif args.excel is not None:
+        ir, _, _ = parse_excel_to_ir(args.excel, sheet_name=args.sheet_name)
+    cases, covered, pending = summarize(ir)
+    print(f"校验通过：共 {cases} 条用例，已覆盖追溯 {covered} 条，待确认 {pending} 条。")
     return 0
 
 

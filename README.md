@@ -43,15 +43,16 @@ test-case-generation/
 ├── assets/
 │   ├── md-test-case-template.md
 │   ├── excel-test-case-template.xlsx
-│   └── example-traceability-matrix.json
+│   └── example-cases-baseline.json
 ├── scripts/
-│   ├── create_excel_cases.py   # 按 JSON 生成 Excel 工作簿
-│   ├── traceability_matrix.py  # 读取并校验需求追溯矩阵
+│   ├── create_excel_cases.py   # 按合并 IR 生成 Excel 工作簿
+│   ├── render_cases.py         # 从合并 IR 一键渲染 Markdown / Excel
+│   ├── traceability_matrix.py  # 需求追溯条目校验与关联同步
 │   ├── validation_utils.py     # 生成器与校验器共享的校验工具
 │   ├── validate_markdown_lists.py
 │   ├── validate_excel_cases.py
 │   ├── validate_traceability_bundle.py
-│   └── sync_traceability.py
+│   └── sync_artifacts.py       # 人工改 Markdown 后回写两种产物
 ├── tests/
 │   └── test_scripts.py         # 脚本自动回归测试
 └── evals/
@@ -90,15 +91,15 @@ python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" --traceabil
 
 `create_excel_cases.py` 默认拒绝覆盖已存在的输出文件；用户确认覆盖后，在生成命令末尾追加 `--force`。其 JSON 结构（`meta` 字段、数组字段写法、`sheet_name` 覆盖等）见 [Excel 规范](references/excel-format.md#生成脚本推荐)。
 
-同时交付 Markdown 和 Excel 时，分别通过格式校验后执行仅覆盖核对；修改矩阵后可同步两种产物的追溯文本：
+同时交付 Markdown 和 Excel 时，可先执行跨格式总校验；人工改完 Markdown 后，用同步脚本补号并回写两种产物：
 
 ```bash
-python "{本目录}/scripts/validate_traceability_bundle.py" --traceability-matrix "<矩阵.json>" --markdown "<文件.md>" --excel "<文件.xlsx>" --coverage-only
+python "{本目录}/scripts/validate_traceability_bundle.py" --markdown "<文件.md>" --excel "<文件.xlsx>"
 
-python "{本目录}/scripts/sync_traceability.py" --traceability-matrix "<矩阵.json>" --markdown "<文件.md>" --excel "<文件.xlsx>"
+python "{本目录}/scripts/sync_artifacts.py" --from-markdown "<文件.md>" --excel "<文件.xlsx>" --assign-ids
 ```
 
-`--coverage-only` 仅核对矩阵中的跨格式覆盖关联，依赖上述 Markdown、Excel 格式校验已通过；不带该参数时，命令会重新执行两种格式校验后再核对覆盖，适合单独执行时使用。
+`--coverage-only` 跳过格式细节，仅核对两种格式的用例与追溯是否一致，适合已完成单格式校验后单独执行。
 以上命令均为单行，Bash 和 PowerShell 均可直接执行。
 
 ## 运行环境
