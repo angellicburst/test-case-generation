@@ -175,7 +175,10 @@ def commit_files_atomic(staged: list[tuple[Path, Path]]) -> list[str]:
     committed: list[Path] = []
     try:
         for target, _temp in staged:
-            backups[target] = copy_to_temp(target) if target.exists() else None
+            try:
+                backups[target] = copy_to_temp(target) if target.exists() else None
+            except OSError as exc:
+                return [f"备份文件失败: {target}（{exc}）"]
         for target, temp in staged:
             try:
                 replace_file_atomic(temp, target)

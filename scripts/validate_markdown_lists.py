@@ -29,6 +29,8 @@ def _list_format_errors(lines: list[str]) -> list[str]:
     errors: list[str] = []
     index = 0
     while index < len(lines):
+        if HEADING_PATTERN.match(lines[index]):
+            break
         header = FIELD_HEADER_PATTERN.match(lines[index])
         if not header:
             index += 1
@@ -179,7 +181,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{index}. {error}", file=sys.stderr)
         return 1
 
-    cases = text.count("- [ ] 正向-") + text.count("- [ ] 反向-")
+    ir, _, _ = parse_markdown_text(text)
+    cases = len(ir.get("cases") or [])
     print(f"Markdown 校验通过: {args.path}（{cases} 条用例）")
     return 0
 

@@ -10,7 +10,8 @@ from typing import Any
 
 from case_baseline import (
     describe_ir_differences,
-    load_baseline,
+    load_baseline_raw,
+    normalize_baseline,
     parse_excel_to_ir,
     parse_markdown_to_ir,
     validate_baseline,
@@ -46,14 +47,16 @@ def validate_bundle(
         return ["必须提供 Markdown 或 Excel 至少一个文件。"]
 
     errors: list[str] = []
+    baseline: dict[str, Any] | None = None
     if baseline_path is not None:
         try:
-            baseline = load_baseline(baseline_path)
+            raw_baseline = load_baseline_raw(baseline_path)
         except ValueError as exc:
             return [str(exc)]
-        errors.extend(validate_baseline(baseline))
+        errors.extend(validate_baseline(raw_baseline))
         if errors:
             return errors
+        baseline = normalize_baseline(raw_baseline)
 
     if not coverage_only:
         if markdown_path is not None:
@@ -64,23 +67,50 @@ def validate_bundle(
         if excel_path is not None:
             errors.extend(validate_excel_file(excel_path, sheet_name=sheet_name))
 
-    if markdown_path is not None and excel_path is not None:
+    markdown_ir: dict[str, Any] = {}
+    excel_ir: dict[str, Any] = {}
+    if markdown_path is not None:
         markdown_ir, markdown_errors, _ = parse_markdown_to_ir(markdown_path)
-        excel_ir, excel_errors, _ = parse_excel_to_ir(excel_path, sheet_name=sheet_name)
         if coverage_only:
             errors.extend(markdown_errors)
+    if excel_path is not None:
+        excel_ir, excel_errors, _ = parse_excel_to_ir(excel_path, sheet_name=sheet_name)
+        if coverage_only:
             errors.extend(excel_errors)
-        if markdown_ir and excel_ir:
+
+    if baseline is not None:
+        if markdown_ir:
             errors.extend(
                 describe_ir_differences(
+                    baseline,
                     markdown_ir,
-                    excel_ir,
+                    "基线 IR",
                     "Markdown",
-                    "Excel",
-                    include_tree_fields=False,
                     include_design_method=False,
                 )
             )
+        if excel_ir:
+            errors.extend(
+                describe_ir_differences(
+                    baseline,
+                    excel_ir,
+                    "基线 IR",
+                    "Excel",
+                    include_tree_fields=False,
+                )
+            )
+
+    if markdown_ir and excel_ir:
+        errors.extend(
+            describe_ir_differences(
+                markdown_ir,
+                excel_ir,
+                "Markdown",
+                "Excel",
+                include_tree_fields=False,
+                include_design_method=False,
+            )
+        )
 
     return list(dict.fromkeys(errors))
 

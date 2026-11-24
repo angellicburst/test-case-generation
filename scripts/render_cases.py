@@ -37,6 +37,7 @@ def build_render_ir(
         raw,
         allow_unassigned_ids=assign_ids,
         require_finalized_traceability=False,
+        check_traceability_links=False,
     )
     if errors:
         return {}, errors, []
@@ -108,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     staged_excel: Path | None = None
     sheet_name = ir["meta"]["sheet_name"]
     try:
+        for target in (markdown_path, excel_path):
+            if target is not None:
+                target.parent.mkdir(parents=True, exist_ok=True)
         if markdown_path is not None:
             temp = sibling_temp_path(markdown_path)
             write_text_atomic(temp, render_markdown(ir))

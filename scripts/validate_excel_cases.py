@@ -64,6 +64,12 @@ def _sheet_layout_errors(
             f"{label}筛选范围必须为 {expected_filter}，"
             f"实际为 {ws.auto_filter.ref or '未设置'}。"
         )
+    for row in (1, 2):
+        for column in range(1, (ws.max_column or width) + 1):
+            if ws.cell(row=row, column=column).data_type == "f":
+                errors.append(
+                    f"{label}第 {row} 行第 {column} 列包含公式，必须为纯文本。"
+                )
     max_column = ws.max_column or 0
     if max_column <= width:
         return
@@ -84,6 +90,10 @@ def validate_info_sheet(workbook: Any, expected_count: int) -> list[str]:
 
     info = workbook["生成说明"]
     errors: list[str] = []
+    if not _cell_text(info["A1"].value):
+        errors.append("生成说明 A1 标题不能为空。")
+    if {str(merged) for merged in info.merged_cells.ranges} != {"A1:B1"}:
+        errors.append("生成说明必须恰好包含 A1:B1 合并标题区域，不得存在其他合并区域。")
     label_rows: dict[str, list[int]] = {label: [] for label in INFO_LABELS}
     for row in range(1, (info.max_row or 0) + 1):
         label = _cell_text(info.cell(row=row, column=1).value)
@@ -162,6 +172,8 @@ def validate_excel_file(file_path: Path, sheet_name: str = "测试用例") -> li
         ]
 
     sheet = workbook[sheet_name]
+    if not _cell_text(sheet["A1"].value):
+        errors.append("主工作表 A1 标题不能为空。")
     _sheet_layout_errors(sheet, len(V2_HEADERS), "A1:K1", errors, "主工作表")
 
     has_pending_sheet = "待确认项" in workbook.sheetnames

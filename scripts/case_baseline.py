@@ -208,6 +208,7 @@ def validate_baseline(
     allow_unassigned_ids: bool = False,
     require_finalized_traceability: bool = True,
     require_tree_fields: bool = True,
+    check_traceability_links: bool = True,
 ) -> list[str]:
     errors: list[str] = []
     if not isinstance(payload, dict):
@@ -277,6 +278,9 @@ def validate_baseline(
 
     seen_ids: set[str] = set()
     seen_titles: set[str] = set()
+    trace_order = [
+        trace_id for trace_id, entry in entries.items() if entry["status"] != "待确认"
+    ]
     for index, case in enumerate(cases, start=1):
         label = f"第 {index} 条用例"
         case_id = case["id"]
@@ -358,13 +362,28 @@ def validate_baseline(
                 errors.append(f"{label}（{case_id}）引用了不存在的追溯 ID '{ref}'。")
             elif entry["status"] == "待确认":
                 errors.append(f"{label}（{case_id}）不得引用待确认条目 '{ref}'。")
+        if (
+            check_traceability_links
+            and refs
+            and all(ref in entries for ref in refs)
+        ):
+            expected_refs = [trace_id for trace_id in trace_order if trace_id in refs]
+            diff = describe_traceability_mismatch(expected_refs, refs)
+            if diff:
+                errors.append(
+                    f"{label}（{case_id}）的追溯引用顺序与追溯表不一致：{diff}"
+                )
 
         for field, value in case.items():
             if _contains_marker(value):
                 errors.append(f"{label}（{case_id}）的 {field} 不得保留 [待确认] 标记。")
 
+    if not check_traceability_links:
+        return errors
+
+    ordered_cases = canonical_tree_order(cases) if require_tree_fields else cases
     expected_links: dict[str, list[str]] = {trace_id: [] for trace_id in entries}
-    for case in canonical_tree_order(cases):
+    for case in ordered_cases:
         refs = case["traceability_refs"]
         if not isinstance(refs, list):
             continue
@@ -812,6 +831,7 @@ def _parse_traceability_section(
 def parse_markdown_text(
     text: str,
     allow_unassigned_ids: bool = False,
+    strict_count: bool = True,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     """Parse Markdown document text into the merged IR."""
     lines = text.splitlines()
@@ -849,17 +869,22 @@ def parse_markdown_text(
         meta["title"] = title
         meta["requirement_name"] = title
 
-    declared_count: int | None = None
+    declared_counts: list[int] = []
     for raw in tree_lines:
         match = COUNT_PATTERN.match(raw.strip())
         if match:
-            declared_count = int(match.group(1))
-            break
+            declared_counts.append(int(match.group(1)))
 
     cases: list[dict[str, Any]] = []
     module = ""
     type_name = ""
     group = ""
+    module_nodes: list[tuple[str, int]] = []
+    type_nodes: list[tuple[str, str, int]] = []
+    group_nodes: list[tuple[str, str, str, int]] = []
+    used_modules: set[str] = set()
+    used_types: set[tuple[str, str]] = set()
+    used_groups: set[tuple[str, str, str]] = set()
     index = 0
     while index < len(tree_lines):
         raw = tree_lines[index]
@@ -871,6 +896,10 @@ def parse_markdown_text(
         if stripped.startswith("#"):
             if stripped.startswith("####"):
                 errors.append(f"第 {line_no} 行：不得使用四级及更深标题。")
+            elif not (stripped.startswith("# ") and stripped[2:].strip() == title):
+                errors.append(
+                    f"第 {line_no} 行：任务树中不得出现标题“{stripped[:30]}”。"
+                )
             index += 1
             continue
         if COUNT_PATTERN.match(stripped):
@@ -979,6 +1008,10 @@ def parse_markdown_text(
                     "traceability_refs": refs,
                 }
             )
+            used_modules.add(module)
+            used_types.add((module, type_name))
+            if case_group:
+                used_groups.add((module, type_name, case_group))
             index = end
             continue
 
@@ -990,15 +1023,18 @@ def parse_markdown_text(
                 module = name
                 type_name = ""
                 group = ""
+                module_nodes.append((name, line_no))
             elif indent == 2:
                 if not module:
                     errors.append(f"第 {line_no} 行：一级测试类型之前缺少功能模块节点。")
                 type_name = name
                 group = ""
+                type_nodes.append((module, name, line_no))
             elif indent == 4:
                 if not type_name:
                     errors.append(f"第 {line_no} 行：分组之前缺少一级测试类型节点。")
                 group = name
+                group_nodes.append((module, type_name, name, line_no))
             else:
                 errors.append(f"第 {line_no} 行：任务树层级必须为 0/2/4 个空格。")
             index += 1
@@ -1007,12 +1043,25 @@ def parse_markdown_text(
         errors.append(f"第 {line_no} 行：无法识别的任务树内容：{stripped[:30]}")
         index += 1
 
-    if declared_count is None:
-        warnings.append("未找到“> 用例数量: 用例 N 条”声明。")
-    elif declared_count != len(cases):
-        errors.append(
-            f"用例数量声明为 {declared_count} 条，实际解析到 {len(cases)} 条。"
-        )
+    for name, node_line in module_nodes:
+        if name not in used_modules:
+            errors.append(f"第 {node_line} 行：功能模块“{name}”下没有任何用例。")
+    for module_name, type_value, node_line in type_nodes:
+        if (module_name, type_value) not in used_types:
+            errors.append(f"第 {node_line} 行：测试类型“{type_value}”下没有任何用例。")
+    for module_name, type_value, group_name, node_line in group_nodes:
+        if (module_name, type_value, group_name) not in used_groups:
+            errors.append(f"第 {node_line} 行：分组“{group_name}”下没有任何用例。")
+
+    if not declared_counts:
+        message = "缺少“> 用例数量: 用例 N 条”声明。"
+        (errors if strict_count else warnings).append(message)
+    elif len(declared_counts) > 1:
+        message = f"用例数量声明重复出现 {len(declared_counts)} 次。"
+        (errors if strict_count else warnings).append(message)
+    elif declared_counts[0] != len(cases):
+        message = f"用例数量声明为 {declared_counts[0]} 条，实际解析到 {len(cases)} 条。"
+        (errors if strict_count else warnings).append(message)
 
     entries = _parse_traceability_section(
         trace_lines, errors, require_covered_table=len(separators) == 1
@@ -1034,13 +1083,14 @@ def parse_markdown_text(
 def parse_markdown_to_ir(
     md_path: str | Path,
     allow_unassigned_ids: bool = False,
+    strict_count: bool = True,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     path = Path(md_path)
     try:
         text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as exc:
         return {}, [f"无法读取 Markdown 文件: {path}（{exc}）"], []
-    return parse_markdown_text(text, allow_unassigned_ids)
+    return parse_markdown_text(text, allow_unassigned_ids, strict_count)
 
 
 # ---------------------------------------------------------------------------
@@ -1304,6 +1354,7 @@ def parse_excel_to_ir(
     excel_path: str | Path,
     sheet_name: str = "测试用例",
     legacy_matrix_path: str | Path | None = None,
+    merge_duplicates: bool = False,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     path = Path(excel_path)
     openpyxl = _require_openpyxl()
@@ -1311,7 +1362,7 @@ def parse_excel_to_ir(
         return {}, ["解析 xlsx 需要 openpyxl，请先安装: pip install openpyxl"], []
     try:
         workbook = openpyxl.load_workbook(path)
-    except (OSError, ValueError) as exc:
+    except Exception as exc:  # corrupted zip, bad XML and permission errors alike
         return {}, [f"无法读取 Excel 文件: {path}（{exc}）"], []
 
     errors: list[str] = []
@@ -1355,7 +1406,8 @@ def parse_excel_to_ir(
             errors.append("工作簿缺少“需求追溯”工作表。")
         if "待确认项" in workbook.sheetnames:
             entries.extend(_parse_traceability_sheet(workbook["待确认项"], "待确认", errors))
-    entries = _merge_duplicate_entries(entries, warnings)
+    if merge_duplicates:
+        entries = _merge_duplicate_entries(entries, warnings)
 
     ir = {
         "schema_version": SCHEMA_VERSION,
@@ -1384,6 +1436,7 @@ def merge_artifacts_to_ir(
     sheet_name: str = "测试用例",
     allow_unassigned_ids: bool = False,
     legacy_matrix_path: str | Path | None = None,
+    strict_count: bool = True,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -1397,13 +1450,18 @@ def merge_artifacts_to_ir(
     excel_ir: dict[str, Any] | None = None
     if md_path:
         md_ir, md_errors, md_warnings = parse_markdown_to_ir(
-            md_path, allow_unassigned_ids=allow_unassigned_ids
+            md_path,
+            allow_unassigned_ids=allow_unassigned_ids,
+            strict_count=strict_count,
         )
         errors.extend(md_errors)
         warnings.extend(md_warnings)
     if excel_path:
         excel_ir, excel_errors, excel_warnings = parse_excel_to_ir(
-            excel_path, sheet_name=sheet_name, legacy_matrix_path=legacy_matrix_path
+            excel_path,
+            sheet_name=sheet_name,
+            legacy_matrix_path=legacy_matrix_path,
+            merge_duplicates=True,
         )
         errors.extend(excel_errors)
         warnings.extend(excel_warnings)
@@ -1437,7 +1495,9 @@ def merge_artifacts_to_ir(
             for field in ("module", "group", "polarity"):
                 if not case[field] and counterpart.get(field):
                     case[field] = counterpart[field]
-        _fill_missing_lists(case, counterpart)
+            # Markdown is authoritative when it is primary: a field deleted there
+            # must stay deleted instead of being resurrected from the old Excel.
+            _fill_missing_lists(case, counterpart)
 
     # 单源解析时的通用提示在合并后可能已不成立，按合并结果重算。
     stale = (

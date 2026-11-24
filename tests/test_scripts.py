@@ -46,9 +46,11 @@ from validate_excel_cases import main as validate_excel_main  # noqa: E402
 from validate_excel_cases import validate_excel_file  # noqa: E402
 from validate_markdown_lists import fix, validate  # noqa: E402
 from validate_markdown_lists import main as validate_markdown_main  # noqa: E402
+import validation_utils  # noqa: E402
 from validate_traceability_bundle import validate_bundle  # noqa: E402
 from validation_utils import (  # noqa: E402
     FileLockedError,
+    commit_files_atomic,
     escape_md_table_cell,
     estimate_row_height,
     format_excel_multiline,
@@ -982,9 +984,13 @@ class RoundTripAndSyncTests(unittest.TestCase):
             directory_path = Path(directory)
             markdown = directory_path / "cases.md"
             excel = directory_path / "cases.xlsx"
-            head, tail = V2_MARKDOWN.split("## 需求追溯\n", 1)
-            head = head.split("    - [ ] 正向-提交合法注册-P0")[0]
-            text = (head + "## 需求追溯\n" + tail).replace("用例 1 条", "用例 0 条")
+            _, tail = V2_MARKDOWN.split("## 需求追溯\n", 1)
+            text = (
+                "# 测试用例 - 2026-11-24 - [注册]\n\n"
+                "> 用例数量: 用例 0 条\n\n"
+                "## 需求追溯\n"
+                + tail
+            )
             markdown.write_text(text, encoding="utf-8")
             save_workbook_atomic(build_workbook_from_ir(valid_ir()), excel)
             ir, errors, _ = prepare_sync_ir(markdown, excel)
@@ -1613,6 +1619,349 @@ class CaseBaselineTests(unittest.TestCase):
                 create_excel_cases, "save_workbook_atomic", side_effect=locked
             ):
                 self.assertEqual(create_excel_cases.main(argv[1:]), 1)
+
+
+def bracketed_ir() -> dict:
+    """Same module, titles whose first bracket differs per case."""
+    ir = valid_ir()
+    base = ir["cases"][0]
+    cases = []
+    for index, title in enumerate(("[登录]_场景1", "[风控]_场景2", "[登录]_场景3"), start=1):
+        case = deepcopy(base)
+        case.update(
+            {"id": f"TC-CS-{index:03d}", "module": "用户中心", "group": "", "title": title}
+        )
+        case["traceability_refs"] = ["TRACE-1"]
+        cases.append(case)
+    ir["cases"] = cases
+    ir["traceability"] = [
+        {
+            "id": "TRACE-1",
+            "source": "用户需求.md",
+            "location": "1.1 登录",
+            "rule": "登录成功",
+            "status": "已覆盖",
+            "case_ids": ["TC-CS-001", "TC-CS-002", "TC-CS-003"],
+        }
+    ]
+    return ir
+
+
+class ReviewFixTests(unittest.TestCase):
+    """Regressions for the blocking review items."""
+
+    def _assert_markdown_error(self, text: str, expected: str) -> None:
+        errors = validate(text)
+        self.assertTrue(any(expected in error for error in errors), errors)
+
+    def _assert_excel_error(self, mutate, expected: str, ir=None) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.xlsx"
+            save_workbook_atomic(build_workbook_from_ir(ir or valid_ir()), path)
+            workbook = load_workbook(path)
+            mutate(workbook)
+            workbook.save(path)
+            errors = validate_excel_file(path)
+        self.assertTrue(any(expected in error for error in errors), errors)
+
+    def _write_ir(self, path: Path, ir: dict) -> None:
+        path.write_text(json.dumps(ir, ensure_ascii=False), encoding="utf-8")
+
+    def _render(self, directory: Path, ir: dict):
+        baseline = directory / "ir.json"
+        markdown = directory / "cases.md"
+        excel = directory / "cases.xlsx"
+        self._write_ir(baseline, ir)
+        code = render_cases_main(
+            [
+                "--baseline",
+                str(baseline),
+                "--markdown",
+                str(markdown),
+                "--excel",
+                str(excel),
+            ]
+        )
+        return code, baseline, markdown, excel
+
+    def test_count_declaration_must_exist_and_be_unique(self):
+        self._assert_markdown_error(
+            V2_MARKDOWN.replace("> 用例数量: 用例 1 条\n\n", ""),
+            "缺少“> 用例数量",
+        )
+        duplicated = V2_MARKDOWN.replace(
+            "> 用例数量: 用例 1 条",
+            "> 用例数量: 用例 1 条\n\n> 用例数量: 用例 1 条",
+        )
+        self._assert_markdown_error(duplicated, "重复出现")
+
+    def test_reference_order_must_match_trace_table(self):
+        text = V2_MARKDOWN.replace(
+            "| TRACE-REG-001 | 注册需求.md | 1.1 手机号 | 手机号必须为11位数字 | TC-ZC-001 |",
+            "| TRACE-REG-001 | 注册需求.md | 1.1 手机号 | 手机号必须为11位数字 | TC-ZC-001 |\n"
+            "| TRACE-REG-002 | 注册需求.md | 1.2 验证码 | 验证码 5 分钟内有效 | TC-ZC-001 |",
+        )
+        ordered = text.replace(
+            "追溯: TRACE-REG-001", "追溯: TRACE-REG-001, TRACE-REG-002"
+        )
+        self.assertEqual(validate(ordered), [])
+        reversed_text = text.replace(
+            "追溯: TRACE-REG-001", "追溯: TRACE-REG-002, TRACE-REG-001"
+        )
+        self._assert_markdown_error(reversed_text, "追溯引用顺序与追溯表不一致")
+
+    def test_stray_headings_and_empty_nodes_rejected(self):
+        stray = V2_MARKDOWN.replace(
+            "  - [ ] 功能测试", "## 其他说明\n\n  - [ ] 功能测试"
+        )
+        self._assert_markdown_error(stray, "任务树中不得出现标题")
+        empty_nodes = V2_MARKDOWN.replace(
+            "\n## 需求追溯",
+            "\n  - [ ] 回归测试\n\n- [ ] 空模块\n\n## 需求追溯",
+        )
+        errors = validate(empty_nodes)
+        self.assertTrue(
+            any("测试类型“回归测试”下没有任何用例" in error for error in errors), errors
+        )
+        self.assertTrue(
+            any("功能模块“空模块”下没有任何用例" in error for error in errors), errors
+        )
+
+    def test_trace_section_is_not_scanned_for_list_markers(self):
+        errors = validate(V2_MARKDOWN + "\n- 测试步骤\n  - 甲\n  - 乙\n")
+        self.assertTrue(any("表外内容" in error for error in errors), errors)
+        self.assertFalse(any("有序列表" in error for error in errors), errors)
+
+    def test_markdown_cli_counts_parsed_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.md"
+            path.write_text(
+                V2_MARKDOWN.replace(
+                    "        - 提交注册。", "        - 提交注册。- [ ] 反向-"
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "validate_markdown_lists.py"),
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=subprocess_env(),
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("（1 条用例）", result.stdout)
+
+    def test_excel_duplicate_trace_ids_rejected(self):
+        def duplicate_row(workbook):
+            sheet = workbook["需求追溯"]
+            for column in range(1, 6):
+                sheet.cell(row=4, column=column, value=sheet.cell(row=3, column=column).value)
+
+        self._assert_excel_error(duplicate_row, "追溯 ID 重复")
+
+        def pending_same_id(workbook):
+            sheet = workbook.create_sheet("待确认项")
+            sheet["A1"] = "待确认项清单"
+            sheet.merge_cells("A1:F1")
+            for index, header in enumerate(PENDING_HEADERS, start=1):
+                sheet.cell(row=2, column=index, value=header)
+            values = [
+                "TRACE-REG-001",
+                "注册需求.md",
+                "1.2 超时",
+                "未定义",
+                "暂按失败处理",
+                "是否重试？",
+            ]
+            for index, value in enumerate(values, start=1):
+                sheet.cell(row=3, column=index, value=value)
+            sheet.freeze_panes = "A3"
+            sheet.auto_filter.ref = "A2:F3"
+
+        self._assert_excel_error(pending_same_id, "追溯 ID 重复")
+
+    def test_excel_titles_and_info_layout_required(self):
+        self._assert_excel_error(
+            lambda workbook: workbook["测试用例"].__setitem__("A1", None),
+            "主工作表 A1 标题不能为空",
+        )
+        self._assert_excel_error(
+            lambda workbook: workbook["生成说明"].__setitem__("A1", None),
+            "生成说明 A1 标题不能为空",
+        )
+        self._assert_excel_error(
+            lambda workbook: workbook["生成说明"].unmerge_cells("A1:B1"),
+            "A1:B1 合并标题区域",
+        )
+        self._assert_excel_error(
+            lambda workbook: workbook["测试用例"].__setitem__("L1", "=1+1"),
+            "包含公式",
+        )
+        self._assert_excel_error(
+            lambda workbook: workbook["需求追溯"].__setitem__("E2", "=1+1"),
+            "包含公式",
+        )
+
+    def test_sync_accepts_stale_count_declaration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown = directory_path / "cases.md"
+            excel = directory_path / "cases.xlsx"
+            text = render_markdown(normalize_baseline(valid_ir_two_cases()))
+            text = text.replace("> 用例数量: 用例 2 条", "> 用例数量: 用例 1 条")
+            markdown.write_text(text, encoding="utf-8")
+            save_workbook_atomic(build_workbook_from_ir(valid_ir_two_cases()), excel)
+            code = sync_artifacts_main(
+                ["--from-markdown", str(markdown), "--excel", str(excel)]
+            )
+            self.assertEqual(code, 0)
+            self.assertIn(
+                "> 用例数量: 用例 2 条", markdown.read_text(encoding="utf-8")
+            )
+
+    def test_sync_supports_custom_sheet_name(self):
+        ir = valid_ir()
+        ir["meta"]["sheet_name"] = "自定义用例"
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown = directory_path / "cases.md"
+            excel = directory_path / "cases.xlsx"
+            save_workbook_atomic(build_workbook_from_ir(ir), excel)
+            markdown.write_text(render_markdown(normalize_baseline(ir)), encoding="utf-8")
+            code = sync_artifacts_main(
+                [
+                    "--from-markdown",
+                    str(markdown),
+                    "--excel",
+                    str(excel),
+                    "--sheet-name",
+                    "自定义用例",
+                ]
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(load_workbook(excel).sheetnames[0], "自定义用例")
+
+    def test_sync_drops_stale_design_method_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown = directory_path / "cases.md"
+            excel = directory_path / "cases.xlsx"
+            markdown.write_text(
+                render_markdown(normalize_baseline(valid_ir_two_cases())).replace(
+                    "[TC-ZC-002]", "[TC-NEW]"
+                ),
+                encoding="utf-8",
+            )
+            save_workbook_atomic(build_workbook_from_ir(valid_ir()), excel)
+            _, errors, warnings = prepare_sync_ir(
+                markdown,
+                excel,
+                assign_ids=True,
+                id_prefix="TC-ZC",
+                default_design_method="等价类划分",
+            )
+        self.assertEqual(errors, [])
+        self.assertFalse(
+            any("缺少 design_method" in warning for warning in warnings), warnings
+        )
+
+    def test_render_creates_missing_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            baseline = directory_path / "ir.json"
+            self._write_ir(baseline, valid_ir())
+            markdown = directory_path / "03-TCD" / "2026-11-24" / "Markdown" / "cases.md"
+            excel = directory_path / "03-TCD" / "2026-11-24" / "Excel" / "cases.xlsx"
+            code = render_cases_main(
+                [
+                    "--baseline",
+                    str(baseline),
+                    "--markdown",
+                    str(markdown),
+                    "--excel",
+                    str(excel),
+                ]
+            )
+            self.assertEqual(code, 0)
+            self.assertTrue(markdown.is_file())
+            self.assertTrue(excel.is_file())
+
+    def test_render_accepts_stale_traceability_links(self):
+        ir = valid_ir()
+        ir["traceability"][0]["case_ids"] = ["TC-ZC-999"]
+        rendered, errors, _ = build_render_ir(ir)
+        self.assertEqual(errors, [])
+        self.assertEqual(rendered["traceability"][0]["case_ids"], ["TC-ZC-001"])
+
+    def test_render_handles_bracketed_titles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            code, _, _, excel = self._render(Path(directory), bracketed_ir())
+            self.assertEqual(code, 0)
+            self.assertEqual(validate_excel_file(excel), [])
+
+    def test_merge_does_not_resurrect_deleted_fields(self):
+        text = render_markdown(normalize_baseline(valid_ir()))
+        block = "- 后置操作\n\n        - 删除本次注册的账号。"
+        self.assertIn(block, text)
+        text = text.replace(block, "")
+        with tempfile.TemporaryDirectory() as directory:
+            markdown = Path(directory) / "cases.md"
+            excel = Path(directory) / "cases.xlsx"
+            markdown.write_text(text, encoding="utf-8")
+            save_workbook_atomic(build_workbook_from_ir(valid_ir()), excel)
+            merged, errors, _ = merge_artifacts_to_ir(md_path=markdown, excel_path=excel)
+        self.assertEqual(errors, [])
+        self.assertEqual(merged["cases"][0]["post_operations"], [])
+
+    def test_bundle_baseline_compares_and_reads_raw(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            code, baseline, markdown, excel = self._render(directory_path, valid_ir())
+            self.assertEqual(code, 0)
+            markdown.write_text(
+                markdown.read_text(encoding="utf-8").replace(
+                    "[合法手机号]", "[非法手机号]"
+                ),
+                encoding="utf-8",
+            )
+            errors = validate_bundle(
+                markdown_path=markdown, excel_path=excel, baseline_path=baseline
+            )
+            self.assertTrue(
+                any("基线 IR" in error and "title" in error for error in errors),
+                errors,
+            )
+
+            raw = json.loads(baseline.read_text(encoding="utf-8"))
+            raw["meta"]["case_count"] = 999
+            baseline.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+            errors = validate_bundle(markdown_path=markdown, baseline_path=baseline)
+        self.assertTrue(any("case_count" in error for error in errors), errors)
+
+    def test_corrupted_excel_reports_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.xlsx"
+            path.write_bytes(b"not a zip")
+            ir, errors, _ = parse_excel_to_ir(path)
+        self.assertEqual(ir, {})
+        self.assertTrue(any("无法读取 Excel 文件" in error for error in errors), errors)
+
+    def test_commit_reports_backup_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "cases.md"
+            target.write_text("旧文件", encoding="utf-8")
+            temp = Path(directory) / "cases.tmp"
+            temp.write_text("新文件", encoding="utf-8")
+            with mock.patch.object(
+                validation_utils, "copy_to_temp", side_effect=OSError("占用")
+            ):
+                errors = commit_files_atomic([(target, temp)])
+            self.assertTrue(any("备份文件失败" in error for error in errors), errors)
+            self.assertEqual(target.read_text(encoding="utf-8"), "旧文件")
 
 
 class ExcelV2RenderTests(unittest.TestCase):

@@ -42,6 +42,7 @@ def prepare_sync_ir(
     renumber: bool = False,
     id_prefix: str | None = None,
     default_design_method: str | None = None,
+    sheet_name: str = "测试用例",
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     """Merge the artifacts and settle IDs, traceability links and design methods."""
     excel_exists = excel_path is not None and excel_path.is_file()
@@ -49,7 +50,9 @@ def prepare_sync_ir(
         md_path=markdown_path,
         excel_path=excel_path if excel_exists else None,
         primary="markdown",
+        sheet_name=sheet_name,
         allow_unassigned_ids=assign_ids,
+        strict_count=False,
     )
     if errors:
         return {}, errors, warnings
@@ -101,6 +104,11 @@ def prepare_sync_ir(
             for case in ir["cases"]:
                 if case["design_method"] not in ALLOWED_DESIGN_METHODS:
                     case["design_method"] = default_design_method
+            warnings[:] = [
+                warning
+                for warning in warnings
+                if not warning.startswith("以下用例缺少 design_method")
+            ]
 
     errors = validate_baseline(ir, require_design_method=excel_path is not None)
     if errors:
@@ -117,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--renumber", action="store_true", help="定稿前重排全部用例 ID")
     parser.add_argument("--id-prefix", help="补号或重排使用的需求简写前缀")
     parser.add_argument("--default-design-method", help="回填缺失设计方法时使用的默认值")
+    parser.add_argument("--sheet-name", default="测试用例", help="主工作表名称")
     args = parser.parse_args(argv)
 
     markdown_path = Path(args.from_markdown).expanduser().resolve()
@@ -135,18 +144,24 @@ def main(argv: list[str] | None = None) -> int:
         renumber=args.renumber,
         id_prefix=args.id_prefix,
         default_design_method=args.default_design_method,
+        sheet_name=args.sheet_name,
     )
     if errors:
         print("同步失败，未写出任何文件:", file=sys.stderr)
         for error in errors:
             print(f"- {error}", file=sys.stderr)
         return 1
+    if excel_path is None or not excel_path.is_file():
+        ir["meta"]["sheet_name"] = args.sheet_name
 
     staged: list[tuple[Path, Path]] = []
     staged_markdown: Path | None = None
     staged_excel: Path | None = None
     sheet_name = ir["meta"]["sheet_name"]
     try:
+        markdown_path.parent.mkdir(parents=True, exist_ok=True)
+        if excel_path is not None:
+            excel_path.parent.mkdir(parents=True, exist_ok=True)
         temp = sibling_temp_path(markdown_path)
         write_text_atomic(temp, render_markdown(ir))
         staged.append((markdown_path, temp))
