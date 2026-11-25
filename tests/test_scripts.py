@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr
 from copy import deepcopy
+import hashlib
+import io
 import json
 import os
 import re
@@ -24,18 +27,23 @@ from case_baseline import (  # noqa: E402
     assign_missing_ids,
     canonical_tree_order,
     describe_ir_differences,
+    inspect_artifacts,
     merge_artifacts_to_ir,
     normalize_baseline,
     parse_excel_to_ir,
     parse_markdown_to_ir,
+    prepare_render_ir,
     renumber_cases,
     validate_baseline,
 )
 from create_excel_cases import build_workbook_from_ir, save_workbook_atomic  # noqa: E402
 from render_cases import build_render_ir, main as render_cases_main  # noqa: E402
+from render_markdown_cases import main as render_markdown_main  # noqa: E402
 from render_markdown_cases import render_markdown  # noqa: E402
 from sync_artifacts import main as sync_artifacts_main  # noqa: E402
 from sync_artifacts import prepare_sync_ir  # noqa: E402
+import create_excel_cases  # noqa: E402
+import render_markdown_cases  # noqa: E402
 from traceability_matrix import (  # noqa: E402
     describe_traceability_mismatch,
     format_trace_id_list,
@@ -52,12 +60,15 @@ import validation_utils  # noqa: E402
 from validate_traceability_bundle import validate_bundle  # noqa: E402
 from validation_utils import (  # noqa: E402
     FileLockedError,
+    _check_targets_writable,
     commit_files_atomic,
     escape_md_table_cell,
     estimate_row_height,
     format_excel_multiline,
     is_valid_date_or_placeholder,
     normalize_list_items,
+    replace_file_atomic,
+    sibling_temp_path,
     split_md_table_row,
     write_text_atomic,
 )
@@ -2799,6 +2810,794 @@ class ValidationUtilsTests(unittest.TestCase):
                 path for path in Path(directory).iterdir() if path.suffix == ".tmp"
             ]
             self.assertEqual(temp_files, [])
+
+
+class DraftSettlementTests(unittest.TestCase):
+    """Scenario 1: draft traceability links settle from cases[].traceability_refs."""
+
+    def _settled_ir(self, status: str, case_ids) -> dict:
+        ir = valid_ir()
+        ir["traceability"][0].update({"status": status, "case_ids": case_ids})
+        return ir
+
+    def test_render_cases_settles_draft_links_without_assign_ids(self):
+        for status, case_ids in (
+            ("已覆盖", []),
+            ("待覆盖", ["TC-ZC-001"]),
+            ("已覆盖", ["", "OLD-1", "OLD-1"]),
+            ("待覆盖", ["", "OLD-1", "OLD-1"]),
+        ):
+            with self.subTest(status=status, case_ids=case_ids):
+                with tempfile.TemporaryDirectory() as directory:
+                    directory_path = Path(directory)
+                    baseline = directory_path / "ir.json"
+                    baseline.write_text(
+                        json.dumps(self._settled_ir(status, case_ids), ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    markdown = directory_path / "cases.md"
+                    excel = directory_path / "cases.xlsx"
+                    code = render_cases_main(
+                        [
+                            "--baseline",
+                            str(baseline),
+                            "--markdown",
+                            str(markdown),
+                            "--excel",
+                            str(excel),
+                        ]
+                    )
+                    self.assertEqual(code, 0)
+                    self.assertIn("TC-ZC-001", markdown.read_text(encoding="utf-8"))
+                    self.assertEqual(validate_excel_file(excel), [])
+
+    def test_single_format_clis_settle_draft_links(self):
+        for status, case_ids in (
+            ("已覆盖", []),
+            ("待覆盖", ["", "OLD-1", "OLD-1"]),
+        ):
+            with self.subTest(status=status):
+                with tempfile.TemporaryDirectory() as directory:
+                    directory_path = Path(directory)
+                    baseline = directory_path / "ir.json"
+                    baseline.write_text(
+                        json.dumps(self._settled_ir(status, case_ids), ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    markdown = directory_path / "cases.md"
+                    excel = directory_path / "cases.xlsx"
+                    self.assertEqual(
+                        render_markdown_main(
+                            ["--baseline", str(baseline), "--output", str(markdown)]
+                        ),
+                        0,
+                    )
+                    self.assertEqual(
+                        create_excel_cases.main(
+                            ["--baseline", str(baseline), "--output", str(excel)]
+                        ),
+                        0,
+                    )
+                    self.assertIn("TC-ZC-001", markdown.read_text(encoding="utf-8"))
+                    self.assertEqual(validate_excel_file(excel), [])
+
+    def test_prepare_render_ir_backfills_case_ids_from_refs(self):
+        ir, errors, _ = prepare_render_ir(
+            self._settled_ir("待覆盖", ["", "OLD-1", "OLD-1"])
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(ir["traceability"][0]["case_ids"], ["TC-ZC-001"])
+        self.assertEqual(ir["traceability"][0]["status"], "已覆盖")
+
+    def test_pending_entry_with_case_ids_is_rejected_in_draft(self):
+        ir = pending_ir()
+        ir["traceability"][1]["case_ids"] = ["TC-ZC-001"]
+        _, errors, _ = prepare_render_ir(ir)
+        self.assertTrue(
+            any("不得关联用例" in error for error in errors), errors
+        )
+
+    def test_non_array_case_ids_rejected_and_kept_out_of_result(self):
+        entries, errors = validate_traceability_entries(
+            [{"id": "T-1", "source": "s", "location": "l", "rule": "r",
+              "status": "已覆盖", "case_ids": "TC-ZC-001"}],
+            allow_unsettled_links=True,
+        )
+        self.assertEqual(entries, {})
+        self.assertTrue(any("必须为数组" in error for error in errors), errors)
+
+    def test_single_format_clis_still_reject_placeholder_ids(self):
+        ir = valid_ir()
+        ir["cases"][0]["id"] = "TC-NEW"
+        ir["traceability"][0].update({"status": "待覆盖", "case_ids": []})
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            baseline = directory_path / "ir.json"
+            baseline.write_text(json.dumps(ir, ensure_ascii=False), encoding="utf-8")
+            markdown = directory_path / "cases.md"
+            excel = directory_path / "cases.xlsx"
+            self.assertEqual(
+                render_markdown_main(
+                    ["--baseline", str(baseline), "--output", str(markdown)]
+                ),
+                1,
+            )
+            self.assertEqual(
+                create_excel_cases.main(
+                    ["--baseline", str(baseline), "--output", str(excel)]
+                ),
+                1,
+            )
+            self.assertFalse(markdown.exists())
+            self.assertFalse(excel.exists())
+
+    def test_check_cli_still_blocks_unsettled_and_malformed_case_ids(self):
+        cases = (
+            ("已覆盖", []),
+            ("待覆盖", ["TC-ZC-001"]),
+            ("已覆盖", ["", "OLD-1"]),
+            ("已覆盖", "TC-ZC-001"),
+        )
+        for status, case_ids in cases:
+            with self.subTest(status=status, case_ids=case_ids):
+                with tempfile.TemporaryDirectory() as directory:
+                    baseline = Path(directory) / "ir.json"
+                    baseline.write_text(
+                        json.dumps(self._settled_ir(status, case_ids), ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    self.assertEqual(
+                        case_baseline.main(["check", "--baseline", str(baseline)]), 1
+                    )
+
+
+class ZeroLeakGuardTests(unittest.TestCase):
+    """Scenario 2: an entry no case references can never render as covered."""
+
+    def test_unreferenced_entry_with_stale_case_ids_blocks_render(self):
+        for status in ("已覆盖", "待覆盖"):
+            with self.subTest(status=status):
+                ir = valid_ir()
+                ir["traceability"].append(
+                    {
+                        "id": "TRACE-REG-002",
+                        "source": "注册需求.md",
+                        "location": "1.3 验证码",
+                        "rule": "验证码 5 分钟内有效",
+                        "status": status,
+                        "case_ids": ["TC-ZC-999"],
+                    }
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    directory_path = Path(directory)
+                    baseline = directory_path / "ir.json"
+                    baseline.write_text(
+                        json.dumps(ir, ensure_ascii=False), encoding="utf-8"
+                    )
+                    markdown = directory_path / "cases.md"
+                    code = render_cases_main(
+                        ["--baseline", str(baseline), "--markdown", str(markdown)]
+                    )
+                    self.assertEqual(code, 1)
+                    self.assertFalse(markdown.exists())
+
+    def test_prepare_render_ir_falls_back_to_pending_coverage(self):
+        ir = valid_ir()
+        ir["traceability"].append(
+            {
+                "id": "TRACE-REG-002",
+                "source": "注册需求.md",
+                "location": "1.3 验证码",
+                "rule": "验证码 5 分钟内有效",
+                "status": "已覆盖",
+                "case_ids": ["TC-ZC-999"],
+            }
+        )
+        _, errors, warnings = prepare_render_ir(ir)
+        self.assertTrue(
+            any("TRACE-REG-002" in error and "待覆盖" in error for error in errors),
+            errors,
+        )
+        self.assertTrue(
+            any("TRACE-REG-002" in warning and "回退" in warning for warning in warnings),
+            warnings,
+        )
+
+
+class CascadeErrorTests(unittest.TestCase):
+    """Scenario 3: one broken entry must not spray 'missing trace ID' errors."""
+
+    def _draft_errors(self, mutate) -> list[str]:
+        ir = valid_ir()
+        mutate(ir)
+        return validate_baseline(
+            ir,
+            allow_unsettled_coverage=True,
+            require_finalized_traceability=False,
+            check_traceability_links=False,
+        )
+
+    def test_covered_with_empty_case_ids_has_no_missing_id_error(self):
+        ir = valid_ir()
+        ir["traceability"][0]["case_ids"] = []
+        errors = validate_baseline(ir)
+        self.assertTrue(
+            any("必须至少关联一个用例" in error for error in errors), errors
+        )
+        self.assertFalse(any("不存在" in error for error in errors), errors)
+
+    def test_missing_rule_reports_only_the_entry_error(self):
+        errors = self._draft_errors(lambda ir: ir["traceability"][0].pop("rule"))
+        self.assertTrue(any("rule 不能为空" in error for error in errors), errors)
+        self.assertFalse(any("不存在" in error for error in errors), errors)
+
+    def test_missing_source_reports_only_the_entry_error(self):
+        errors = self._draft_errors(lambda ir: ir["traceability"][0].update(source=""))
+        self.assertTrue(any("source 与 location 不能为空" in error for error in errors), errors)
+        self.assertFalse(any("不存在" in error for error in errors), errors)
+
+    def test_referenced_pending_entry_still_reports_pending_reference(self):
+        ir = pending_ir()
+        ir["traceability"][1]["case_ids"] = ["TC-ZC-001"]
+        ir["cases"][0]["traceability_refs"] = ["TRACE-REG-001", "TRACE-REG-Q01"]
+        errors = validate_baseline(ir)
+        self.assertTrue(
+            any("不得引用待确认条目 'TRACE-REG-Q01'" in error for error in errors),
+            errors,
+        )
+        self.assertFalse(any("不存在" in error for error in errors), errors)
+
+    def test_typo_id_still_reports_missing_trace_id(self):
+        errors = self._draft_errors(
+            lambda ir: ir["cases"][0].update(traceability_refs=["TRACE-REG-999"])
+        )
+        self.assertTrue(
+            any("引用了不存在的追溯 ID 'TRACE-REG-999'" in error for error in errors),
+            errors,
+        )
+
+
+class ExampleAssetTests(unittest.TestCase):
+    """Scenario 4: the shipped sample IR must stay checkable and renderable."""
+
+    def test_sample_passes_check_and_renders_four_sheets(self):
+        sample = ROOT / "assets" / "example-cases-baseline.json"
+        before = sample.read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            baseline = directory_path / "ir.json"
+            baseline.write_bytes(before)
+            self.assertEqual(
+                case_baseline.main(["check", "--baseline", str(baseline)]), 0
+            )
+            markdown = directory_path / "cases.md"
+            excel = directory_path / "cases.xlsx"
+            self.assertEqual(
+                render_cases_main(
+                    [
+                        "--baseline",
+                        str(baseline),
+                        "--markdown",
+                        str(markdown),
+                        "--excel",
+                        str(excel),
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(validate_excel_file(excel), [])
+            self.assertEqual(
+                load_workbook(excel).sheetnames,
+                ["测试用例", "生成说明", "需求追溯", "待确认项"],
+            )
+            self.assertEqual(
+                validate_bundle(markdown_path=markdown, excel_path=excel), []
+            )
+        self.assertEqual(sample.read_bytes(), before)
+
+
+class WritePreflightTests(unittest.TestCase):
+    """Scenario 5: permission, directory and lock pre-flight attribution."""
+
+    def test_missing_target_with_unwritable_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "cases.md"
+            with mock.patch.object(
+                validation_utils, "_is_parent_writable", return_value=False
+            ):
+                errors = _check_targets_writable([target])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("输出目录不可写", errors[0])
+        self.assertNotIn("被占用", errors[0])
+
+    def test_replace_reports_unwritable_parent_only_when_unwritable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "cases.md"
+            temp = Path(directory) / "cases.tmp"
+            temp.write_text("新", encoding="utf-8")
+            with mock.patch.object(
+                validation_utils, "_is_parent_writable", return_value=False
+            ), mock.patch.object(
+                validation_utils.os,
+                "replace",
+                side_effect=PermissionError(13, "denied", str(target)),
+            ):
+                with self.assertRaises(PermissionError) as context:
+                    replace_file_atomic(temp, target)
+            self.assertIn("输出目录不可写", str(context.exception))
+
+            temp.write_text("新", encoding="utf-8")
+            with mock.patch.object(
+                validation_utils, "_is_parent_writable", return_value=True
+            ), mock.patch.object(
+                validation_utils.os,
+                "replace",
+                side_effect=PermissionError(13, "denied", str(target)),
+            ):
+                with self.assertRaises(PermissionError) as context:
+                    replace_file_atomic(temp, target)
+            self.assertNotIn("输出目录不可写", str(context.exception))
+            self.assertNotIn("被占用", str(context.exception))
+
+    def test_readonly_target_skips_backup_and_replace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "cases.md"
+            target.write_text("旧", encoding="utf-8")
+            temp = sibling_temp_path(target)
+            temp.write_text("新", encoding="utf-8")
+            with mock.patch.object(
+                validation_utils, "_is_readonly_or_unwritable", return_value=True
+            ), mock.patch.object(
+                validation_utils, "copy_to_temp"
+            ) as copy_mock, mock.patch.object(
+                validation_utils, "replace_file_atomic"
+            ) as replace_mock:
+                errors = commit_files_atomic([(target, temp)])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("文件不可写", errors[0])
+        self.assertNotIn("被占用", errors[0])
+        copy_mock.assert_not_called()
+        replace_mock.assert_not_called()
+
+    def test_non_permission_oserror_keeps_its_own_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "cases.md"
+            target.write_text("x", encoding="utf-8")
+            with mock.patch.object(
+                validation_utils.os, "name", "nt"
+            ), mock.patch.object(
+                validation_utils, "_is_readonly_or_unwritable", return_value=False
+            ), mock.patch.object(
+                Path, "open", side_effect=OSError(28, "No space left on device")
+            ):
+                errors = _check_targets_writable([target])
+        self.assertEqual(len(errors), 1)
+        self.assertNotIn("被占用", errors[0])
+        self.assertIn("No space left", errors[0])
+
+    def test_commit_passes_through_readonly_and_dir_permission_errors(self):
+        for message, expected in (
+            ("文件不可写（只读或权限不足）：x", "文件不可写"),
+            ("输出目录不可写（权限不足），无法写入：x", "输出目录不可写"),
+        ):
+            with self.subTest(expected=expected):
+                with tempfile.TemporaryDirectory() as directory:
+                    target = Path(directory) / "cases.md"
+                    target.write_text("旧", encoding="utf-8")
+                    temp = sibling_temp_path(target)
+                    temp.write_text("新", encoding="utf-8")
+                    with mock.patch.object(
+                        validation_utils,
+                        "replace_file_atomic",
+                        side_effect=PermissionError(message),
+                    ):
+                        errors = commit_files_atomic([(target, temp)])
+                self.assertEqual(len(errors), 1)
+                self.assertIn(expected, errors[0])
+                self.assertNotIn("文件被占用", errors[0])
+
+    def test_windows_share_lock_on_second_target_touches_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            first = directory_path / "a.md"
+            second = directory_path / "b.md"
+            first.write_text("旧甲", encoding="utf-8")
+            second.write_text("旧乙", encoding="utf-8")
+            first_temp = sibling_temp_path(first)
+            first_temp.write_text("新甲", encoding="utf-8")
+            second_temp = sibling_temp_path(second)
+            second_temp.write_text("新乙", encoding="utf-8")
+            first_bytes = first.read_bytes()
+
+            original_open = Path.open
+            share_violation = PermissionError(13, "locked", str(second))
+            share_violation.winerror = 32
+
+            def locked_open(self, mode="r", *args, **kwargs):
+                if self == second and mode == "r+b":
+                    raise share_violation
+                return original_open(self, mode, *args, **kwargs)
+
+            with mock.patch.object(
+                validation_utils.os, "name", "nt"
+            ), mock.patch.object(Path, "open", locked_open), mock.patch.object(
+                validation_utils, "copy_to_temp"
+            ) as copy_mock, mock.patch.object(
+                validation_utils, "replace_file_atomic"
+            ) as replace_mock:
+                errors = commit_files_atomic(
+                    [(first, first_temp), (second, second_temp)]
+                )
+            self.assertEqual(len(errors), 1)
+            self.assertIn("文件被占用", errors[0])
+            self.assertEqual(first.read_bytes(), first_bytes)
+            copy_mock.assert_not_called()
+            replace_mock.assert_not_called()
+
+    def test_workbook_save_reports_readonly_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.xlsx"
+            workbook = build_workbook_from_ir(valid_ir())
+            with mock.patch.object(
+                validation_utils, "_is_readonly_or_unwritable", return_value=True
+            ), mock.patch.object(
+                create_excel_cases.os,
+                "replace",
+                side_effect=PermissionError(13, "denied", str(path)),
+            ):
+                path.write_bytes(b"old")
+                with self.assertRaises(PermissionError) as context:
+                    save_workbook_atomic(workbook, path)
+            self.assertIn("文件不可写", str(context.exception))
+            self.assertEqual(path.read_bytes(), b"old")
+            leftovers = [p.name for p in Path(directory).iterdir() if p.name != path.name]
+            self.assertEqual(leftovers, [])
+
+
+class RenderFailureHintTests(unittest.TestCase):
+    """Scenario 5 tail: rollback-failure hints and temporary IR retention."""
+
+    def _render_failure(self, rollback_fails: bool):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            baseline = directory_path / "ir.json"
+            baseline.write_text(json.dumps(valid_ir(), ensure_ascii=False), encoding="utf-8")
+            markdown = directory_path / "cases.md"
+            excel = directory_path / "cases.xlsx"
+            excel.write_bytes(b"old")
+            if not rollback_fails:
+                # A pre-existing first target rolls back by restoring its backup,
+                # so only the never-existed case reaches the unlink-based rollback.
+                markdown.write_text("旧 Markdown", encoding="utf-8")
+
+            real_replace = validation_utils.replace_file_atomic
+
+            def flaky_replace(source, target):
+                # Staging also goes through replace_file_atomic, so fail on the
+                # commit of the Excel target instead of counting calls.
+                if Path(target) == excel:
+                    raise PermissionError(13, "locked", str(target))
+                return real_replace(source, target)
+
+            argv = [
+                "--baseline",
+                str(baseline),
+                "--markdown",
+                str(markdown),
+                "--excel",
+                str(excel),
+                "--force",
+                # Without this a deleted IR would look like a pass; the failed
+                # commit must skip cleanup and leave the IR in place.
+                "--cleanup-baseline",
+            ]
+            stderr = io.StringIO()
+            with mock.patch.object(
+                validation_utils, "replace_file_atomic", side_effect=flaky_replace
+            ):
+                if rollback_fails:
+                    original_unlink = Path.unlink
+
+                    def failing_unlink(self, missing_ok=False):
+                        if self.name == "cases.md":
+                            raise OSError("回滚失败模拟")
+                        return original_unlink(self, missing_ok=missing_ok)
+
+                    with mock.patch.object(
+                        Path, "unlink", failing_unlink
+                    ), redirect_stderr(stderr):
+                        code = render_cases_main(argv)
+                else:
+                    with redirect_stderr(stderr):
+                        code = render_cases_main(argv)
+            return code, stderr.getvalue(), baseline.exists()
+
+    def test_failure_without_rollback_error_keeps_temp_ir(self):
+        code, stderr, baseline_exists = self._render_failure(rollback_fails=False)
+        self.assertEqual(code, 1)
+        self.assertIn("其余目标文件均未变更", stderr)
+        self.assertIn("临时 IR 已保留", stderr)
+        self.assertTrue(baseline_exists)
+
+    def test_failure_with_rollback_error_reports_manual_restore(self):
+        code, stderr, baseline_exists = self._render_failure(rollback_fails=True)
+        self.assertEqual(code, 1)
+        self.assertIn("回滚失败", stderr)
+        self.assertIn("临时 IR 仍保留", stderr)
+        self.assertTrue(baseline_exists)
+
+    def _sync_failure(self, rollback_fails: bool):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            baseline = directory_path / "ir.json"
+            baseline.write_text(json.dumps(valid_ir(), ensure_ascii=False), encoding="utf-8")
+            markdown = directory_path / "cases.md"
+            excel = directory_path / "cases.xlsx"
+            self.assertEqual(
+                render_cases_main(
+                    [
+                        "--baseline",
+                        str(baseline),
+                        "--markdown",
+                        str(markdown),
+                        "--excel",
+                        str(excel),
+                    ]
+                ),
+                0,
+            )
+            markdown.write_text(
+                markdown.read_text(encoding="utf-8").replace(
+                    "[合法手机号]", "[非法手机号]"
+                ),
+                encoding="utf-8",
+            )
+            real_replace = validation_utils.replace_file_atomic
+
+            def flaky_replace(source, target):
+                if Path(target) == excel:
+                    raise PermissionError(13, "locked", str(target))
+                return real_replace(source, target)
+
+            stderr = io.StringIO()
+            with mock.patch.object(
+                validation_utils, "replace_file_atomic", side_effect=flaky_replace
+            ):
+                if rollback_fails:
+                    # Both targets exist, so rollback restores backups through
+                    # os.replace; fail only that second replace of the Markdown.
+                    real_os_replace = os.replace
+                    seen = {"count": 0}
+
+                    def failing_replace(source, target):
+                        if Path(target) == markdown:
+                            seen["count"] += 1
+                            if seen["count"] == 2:
+                                raise OSError("回滚失败模拟")
+                        return real_os_replace(source, target)
+
+                    with mock.patch.object(
+                        validation_utils.os, "replace", failing_replace
+                    ), redirect_stderr(stderr):
+                        code = sync_artifacts_main(
+                            ["--from-markdown", str(markdown), "--excel", str(excel)]
+                        )
+                else:
+                    with redirect_stderr(stderr):
+                        code = sync_artifacts_main(
+                            ["--from-markdown", str(markdown), "--excel", str(excel)]
+                        )
+            return code, stderr.getvalue()
+
+    def test_sync_failure_without_rollback_error_keeps_original_files(self):
+        code, stderr = self._sync_failure(rollback_fails=False)
+        self.assertEqual(code, 1)
+        self.assertIn("其余目标文件均未变更", stderr)
+        self.assertNotIn("回滚失败", stderr)
+
+    def test_sync_failure_with_rollback_error_reports_manual_restore(self):
+        code, stderr = self._sync_failure(rollback_fails=True)
+        self.assertEqual(code, 1)
+        self.assertIn("回滚失败", stderr)
+        self.assertIn("请先按上方备份路径手工恢复", stderr)
+
+
+class InspectSummaryTests(unittest.TestCase):
+    """Scenario 6: the read-only inspect summary."""
+
+    def _render(self, directory: Path, ir: dict) -> tuple[Path, Path]:
+        baseline = directory / "ir.json"
+        baseline.write_text(json.dumps(ir, ensure_ascii=False), encoding="utf-8")
+        markdown = directory / "cases.md"
+        excel = directory / "cases.xlsx"
+        self.assertEqual(
+            render_cases_main(
+                [
+                    "--baseline",
+                    str(baseline),
+                    "--markdown",
+                    str(markdown),
+                    "--excel",
+                    str(excel),
+                ]
+            ),
+            0,
+        )
+        return markdown, excel
+
+    def test_single_sources_and_multi_source_sections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown, excel = self._render(directory_path, pending_ir())
+            baseline = directory_path / "ir.json"
+            before = {
+                path: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (markdown, excel, baseline)
+            }
+
+            for kwargs, expected in (
+                ({"markdown_path": markdown}, "=== Markdown ==="),
+                ({"excel_path": excel}, "=== Excel ==="),
+                ({"baseline_path": baseline}, "=== Baseline IR ==="),
+            ):
+                with self.subTest(source=expected):
+                    lines, errors = inspect_artifacts(**kwargs)
+                    self.assertEqual(errors, [])
+                    self.assertEqual(lines[0], expected)
+
+            lines, errors = inspect_artifacts(
+                markdown_path=markdown, excel_path=excel, baseline_path=baseline
+            )
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                [line for line in lines if line.startswith("=== ")],
+                ["=== Baseline IR ===", "=== Markdown ===", "=== Excel ==="],
+            )
+            self.assertIn("工作表：测试用例、生成说明、需求追溯、待确认项", lines)
+            for path, digest in before.items():
+                self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest)
+
+    def test_requires_at_least_one_source(self):
+        self.assertEqual(
+            inspect_artifacts(), ([], ["必须提供 --markdown、--excel 或 --baseline 至少一个。"])
+        )
+
+    def _id_line_for(self, count: int) -> str:
+        ir = valid_ir()
+        base = ir["cases"][0]
+        cases = []
+        for index in range(1, count + 1):
+            case = deepcopy(base)
+            case.update({"id": f"TC-ZC-{index:03d}", "title": f"场景 {index}"})
+            cases.append(case)
+        ir["cases"] = cases
+        ir["traceability"][0]["case_ids"] = [case["id"] for case in cases]
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / "ir.json"
+            baseline.write_text(json.dumps(ir, ensure_ascii=False), encoding="utf-8")
+            lines, errors = inspect_artifacts(baseline_path=baseline)
+        self.assertEqual(errors, [])
+        return next(line for line in lines if line.startswith("用例 ID："))
+
+    def test_thirty_ids_are_listed_in_full(self):
+        id_line = self._id_line_for(30)
+        self.assertNotIn("…", id_line)
+        self.assertIn("TC-ZC-001、TC-ZC-002", id_line)
+        self.assertIn("TC-ZC-029、TC-ZC-030", id_line)
+        self.assertIn("TC-ZC-015", id_line)
+        self.assertTrue(id_line.endswith("TC-ZC-030"))
+
+    def test_id_list_truncates_beyond_thirty(self):
+        id_line = self._id_line_for(31)
+        self.assertIn("TC-ZC-001、TC-ZC-002、TC-ZC-003、TC-ZC-004、TC-ZC-005", id_line)
+        self.assertIn("TC-ZC-027、TC-ZC-028、TC-ZC-029、TC-ZC-030、TC-ZC-031", id_line)
+        self.assertIn("（共 31 条）", id_line)
+        self.assertNotIn("TC-ZC-015", id_line)
+
+    def test_ids_expand_hits_and_report_misses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown, _ = self._render(directory_path, valid_ir())
+            lines, errors = inspect_artifacts(
+                markdown_path=markdown, ids=["TC-ZC-001", "TC-MISSING"]
+            )
+        self.assertEqual(errors, [])
+        self.assertIn("--- TC-ZC-001 ---", lines)
+        self.assertIn("未找到用例: TC-MISSING", lines)
+
+    def test_malformed_refs_do_not_crash(self):
+        for refs in ("TRACE-REG-001", 123, None):
+            with self.subTest(refs=refs):
+                ir = valid_ir()
+                ir["cases"][0]["traceability_refs"] = refs
+                lines = case_baseline._inspect_summary(ir, "IR", ["TC-ZC-001"])
+                self.assertIn("追溯引用：（无）", lines)
+
+    def test_missing_excel_reports_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing.xlsx"
+            lines, errors = inspect_artifacts(excel_path=path)
+        self.assertEqual(lines, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Excel:", errors[0])
+        self.assertIn("无法读取", errors[0])
+
+
+class OpenpyxlBlockedInspectTests(unittest.TestCase):
+    """Scenario 7: inspect must work without openpyxl except for --excel."""
+
+    def test_inspect_markdown_and_baseline_without_openpyxl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            blocker = directory_path / "blocker"
+            blocker.mkdir()
+            (blocker / "sitecustomize.py").write_text(
+                "import sys\n"
+                "\n"
+                "class _BlockOpenpyxl:\n"
+                "    def find_spec(self, fullname, path=None, target=None):\n"
+                "        if fullname == 'openpyxl' or fullname.startswith('openpyxl.'):\n"
+                "            raise ImportError('openpyxl blocked for inspect test')\n"
+                "        return None\n"
+                "\n"
+                "sys.meta_path.insert(0, _BlockOpenpyxl())\n",
+                encoding="utf-8",
+            )
+            baseline = directory_path / "ir.json"
+            baseline.write_text(json.dumps(valid_ir(), ensure_ascii=False), encoding="utf-8")
+            markdown = directory_path / "cases.md"
+            self.assertEqual(
+                render_cases_main(["--baseline", str(baseline), "--markdown", str(markdown)]),
+                0,
+            )
+            env = {**subprocess_env(), "PYTHONPATH": str(blocker)}
+
+            def run(*args: str) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    [sys.executable, *args],
+                    cwd=directory_path,
+                    env=env,
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                )
+
+            self.assertNotEqual(run("-c", "import openpyxl").returncode, 0)
+
+            script = str(ROOT / "scripts" / "case_baseline.py")
+            for command, expected in (
+                ((script, "inspect", "--markdown", str(markdown)), "=== Markdown ==="),
+                ((script, "inspect", "--baseline", str(baseline)), "=== Baseline IR ==="),
+            ):
+                with self.subTest(command=command[2]):
+                    result = run(*command)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(expected, result.stdout)
+                    self.assertNotIn("openpyxl", result.stderr)
+
+            excel = directory_path / "cases.xlsx"
+            result = run(script, "inspect", "--excel", str(excel))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("openpyxl", result.stderr)
+
+
+class DeadFunctionCleanupTests(unittest.TestCase):
+    """Scenario 8: the removed v1 helpers stay removed and legacy paths still work."""
+
+    def test_removed_helpers_are_gone(self):
+        import traceability_matrix
+
+        for name in ("entries_for_case_id", "entries_for_case_title", "final_matrix_errors"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(traceability_matrix, name))
+
+    def test_load_traceability_matrix_still_reads_legacy_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "matrix.json"
+            write_matrix(path, TRACEABILITY_MATRIX)
+            matrix, errors = load_traceability_matrix(path)
+        self.assertEqual(errors, [])
+        self.assertEqual(matrix["TRACE-REG-001"]["rule"], "手机号必须为11位数字")
 
 
 if __name__ == "__main__":
