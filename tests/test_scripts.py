@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,7 @@ from openpyxl import Workbook, load_workbook
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import case_baseline  # noqa: E402
 from case_baseline import (  # noqa: E402
     PENDING_HEADERS,
     V1_HEADERS,
@@ -182,6 +184,22 @@ def valid_ir_two_cases() -> dict:
     return ir
 
 
+def pending_ir() -> dict:
+    ir = valid_ir()
+    ir["traceability"].append(
+        {
+            "id": "TRACE-REG-Q01",
+            "source": "注册需求.md",
+            "location": "1.2 超时",
+            "status": "待确认",
+            "issue": "超时行为未定义",
+            "assumption": "暂按失败处理",
+            "question": "超时是否重试？",
+        }
+    )
+    return ir
+
+
 def interleaved_ir() -> dict:
     """Cases deliberately ordered 甲/乙/甲 so canonical order has to regroup them."""
     ir = valid_ir()
@@ -223,6 +241,22 @@ class MarkdownV2Tests(unittest.TestCase):
 
     def test_valid_document(self):
         self.assertEqual(validate(V2_MARKDOWN), [])
+
+    def test_render_omits_optional_fields_and_pending_section(self):
+        ir = valid_ir()
+        ir["cases"][0]["test_data"] = []
+        ir["cases"][0]["post_operations"] = []
+        text = render_markdown(normalize_baseline(ir))
+        self.assertNotIn("- 测试数据", text)
+        self.assertNotIn("- 后置操作", text)
+        self.assertNotIn("### 待确认项", text)
+        self.assertLess(text.index("- 前置操作"), text.index("- 测试步骤"))
+        self.assertLess(text.index("- 测试步骤"), text.index("- 预期结果"))
+        self.assertEqual(validate(text), [])
+
+    def test_parser_rejects_continuation_before_first_item(self):
+        text = V2_MARKDOWN.replace("        - 用户未注册。", "        用户未注册。")
+        self._assert_error(text, "首个列表项之前出现续行")
 
     def test_bundled_template_is_valid(self):
         text = (ROOT / "assets" / "md-test-case-template.md").read_text(encoding="utf-8")
@@ -365,6 +399,27 @@ class MarkdownV2Tests(unittest.TestCase):
         self.assertIn("  1. 第一步\r\n  2. 第二步", fixed)
         self.assertTrue(fixed.endswith("- 测试步骤\r\n  - 甲\r\n  - 乙\r\n"))
         self.assertNotIn("1. 甲", fixed)
+
+    def test_fix_covers_all_five_fields_and_skips_trace_section(self):
+        fields = ["前置操作", "测试数据", "测试步骤", "预期结果", "后置操作"]
+        blocks = []
+        for field_index, field in enumerate(fields):
+            first, second = f"字段{field_index}甲", f"字段{field_index}乙"
+            blocks.append(f"        - {field}\n          - {first}\n          - {second}\n")
+        text = "\n".join(blocks) + (
+            "\n## 需求追溯\n\n- 测试步骤\n  - 表内甲\n  - 表内乙\n"
+        )
+
+        fixed = fix(text)
+
+        for field_index, field in enumerate(fields):
+            self.assertIn(f"        - {field}\n", fixed)
+            self.assertIn(
+                f"          1. 字段{field_index}甲\n          2. 字段{field_index}乙",
+                fixed,
+            )
+        self.assertTrue(fixed.endswith("- 测试步骤\n  - 表内甲\n  - 表内乙\n"))
+        self.assertNotIn("1. 表内甲", fixed)
 
     def test_baseline_comparison_ignores_design_method(self):
         errors = validate(V2_MARKDOWN, valid_ir())
@@ -865,6 +920,21 @@ class RoundTripAndSyncTests(unittest.TestCase):
             argv.extend(["--excel", str(excel)])
         return sync_artifacts_main([*argv, *extra])
 
+    def _case_block(self, lines: list[str], marker: str) -> tuple[int, int]:
+        start = next(index for index, line in enumerate(lines) if marker in line)
+        while start > 0 and not re.match(
+            r"^ *- \[ \] (?:正向|反向)-.+-P[0-4]\s*$", lines[start]
+        ):
+            start -= 1
+        indent = len(lines[start]) - len(lines[start].lstrip())
+        end = start + 1
+        while end < len(lines):
+            current = lines[end]
+            if current.strip() and len(current) - len(current.lstrip()) <= indent:
+                break
+            end += 1
+        return start, end
+
     def test_render_cases_writes_both_formats(self):
         with tempfile.TemporaryDirectory() as directory:
             code, baseline, markdown, excel = self._render(Path(directory), valid_ir())
@@ -1058,6 +1128,373 @@ class RoundTripAndSyncTests(unittest.TestCase):
             self.assertEqual(self._sync(markdown, None), 0)
             self.assertEqual(validate(markdown.read_text(encoding="utf-8")), [])
 
+    def test_export_ir_from_both_formats_preserves_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            code, _, markdown, excel = self._render(directory_path, pending_ir())
+            self.assertEqual(code, 0)
+            exported = directory_path / "exported.json"
+            self.assertEqual(
+                case_baseline.main(
+                    [
+                        "export",
+                        "--markdown",
+                        str(markdown),
+                        "--excel",
+                        str(excel),
+                        "--output",
+                        str(exported),
+                    ]
+                ),
+                0,
+            )
+            data = json.loads(exported.read_text(encoding="utf-8"))
+            self.assertEqual([case["id"] for case in data["cases"]], ["TC-ZC-001"])
+            self.assertEqual(data["cases"][0]["design_method"], "等价类划分")
+            self.assertEqual(data["meta"]["coverage"], "覆盖注册主流程")
+            pending = [
+                entry for entry in data["traceability"] if entry["status"] == "待确认"
+            ]
+            self.assertEqual(pending[0]["question"], "超时是否重试？")
+
+            data["traceability"] = [
+                entry for entry in data["traceability"] if entry["status"] != "待确认"
+            ]
+            baseline = directory_path / "cleared.json"
+            baseline.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            cleared_md = directory_path / "cleared.md"
+            cleared_xlsx = directory_path / "cleared.xlsx"
+            self.assertEqual(
+                render_cases_main(
+                    [
+                        "--baseline",
+                        str(baseline),
+                        "--markdown",
+                        str(cleared_md),
+                        "--excel",
+                        str(cleared_xlsx),
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(
+                load_workbook(cleared_xlsx).sheetnames,
+                ["测试用例", "生成说明", "需求追溯"],
+            )
+            self.assertNotIn(
+                "### 待确认项", cleared_md.read_text(encoding="utf-8")
+            )
+            cleared_out = directory_path / "cleared_out.json"
+            self.assertEqual(
+                case_baseline.main(
+                    [
+                        "export",
+                        "--markdown",
+                        str(cleared_md),
+                        "--excel",
+                        str(cleared_xlsx),
+                        "--output",
+                        str(cleared_out),
+                    ]
+                ),
+                0,
+            )
+            cleared = json.loads(cleared_out.read_text(encoding="utf-8"))
+            self.assertFalse(
+                any(entry["status"] == "待确认" for entry in cleared["traceability"])
+            )
+
+    def test_export_legacy_v1_workbook_with_matrix(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "测试用例"
+        sheet["A1"] = "测试用例 - 未指定日期 - [注册]"
+        for index, header in enumerate(V1_HEADERS, start=1):
+            sheet.cell(row=2, column=index, value=header)
+        row = [
+            "",
+            "TC-REG-001",
+            "[注册模块]提交合法注册",
+            "功能测试",
+            "等价类划分",
+            "P0",
+            "用户未注册",
+            "<独立测试账号>",
+            "提交注册",
+            "注册成功",
+            "[需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字",
+        ]
+        for index, value in enumerate(row, start=1):
+            sheet.cell(row=3, column=index, value=value)
+        info = workbook.create_sheet("生成说明")
+        for row_index, (label, value) in enumerate(
+            (("需求名称", "注册需求"), ("上线日期", "未指定日期")), start=2
+        ):
+            info.cell(row=row_index, column=1, value=label)
+            info.cell(row=row_index, column=2, value=value)
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            target = directory_path / "legacy.xlsx"
+            matrix_path = directory_path / "matrix.json"
+            output = directory_path / "exported.json"
+            workbook.save(target)
+            write_matrix(matrix_path, TRACEABILITY_MATRIX)
+            self.assertEqual(
+                case_baseline.main(
+                    [
+                        "export",
+                        "--excel",
+                        str(target),
+                        "--legacy-matrix",
+                        str(matrix_path),
+                        "--output",
+                        str(output),
+                    ]
+                ),
+                0,
+            )
+            data = json.loads(output.read_text(encoding="utf-8"))
+            case = data["cases"][0]
+            self.assertEqual(case["id"], "TC-REG-001")
+            self.assertEqual(case["design_method"], "等价类划分")
+            self.assertEqual(case["traceability_refs"], ["TRACE-REG-001"])
+
+    def test_sync_manual_edit_preserves_gap_and_backfills_new_case(self):
+        ir = valid_ir()
+        first = ir["cases"][0]
+        third = deepcopy(first)
+        third.update(
+            {
+                "id": "TC-ZC-003",
+                "title": "[注册模块]_[注册]_[边界手机号]_[成功]",
+                "design_method": "边界值分析",
+            }
+        )
+        fifth = deepcopy(first)
+        fifth.update(
+            {
+                "id": "TC-ZC-005",
+                "title": "[注册模块]_[注册]_[异常手机号]_[失败]",
+                "polarity": "反向",
+                "design_method": "错误推测法",
+            }
+        )
+        ir["cases"] = [first, third, fifth]
+        ir["traceability"][0]["case_ids"] = ["TC-ZC-001", "TC-ZC-003", "TC-ZC-005"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            code, _, markdown, excel = self._render(directory_path, ir)
+            self.assertEqual(code, 0)
+
+            lines = markdown.read_text(encoding="utf-8").splitlines()
+            lines = [
+                line.replace(
+                    "[注册模块]_[注册]_[合法手机号]_[成功]",
+                    "[注册模块]_[注册]_[合法手机号]_[提交成功]",
+                )
+                for line in lines
+            ]
+            start, end = self._case_block(lines, "[TC-ZC-003]")
+            del lines[start:end]
+
+            start, end = self._case_block(lines, "[TC-ZC-001]")
+            clone = list(lines[start:end])
+            clone[0] = clone[0].replace(
+                "正向-[注册模块]_[注册]_[合法手机号]_[提交成功]-P0",
+                "反向-新增无号场景-P2",
+            )
+            clone = [
+                re.sub(
+                    r"^(\s*)> \[TC-ZC-001\] 追溯:",
+                    r"\1> 追溯:",
+                    line,
+                )
+                for line in clone
+            ]
+            insert_at, _ = self._case_block(lines, "[TC-ZC-005]")
+            lines[insert_at:insert_at] = clone
+            markdown.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            before = markdown.read_text(encoding="utf-8")
+
+            self.assertEqual(
+                self._sync(
+                    markdown, excel, ("--assign-ids", "--id-prefix", "TC-ZC")
+                ),
+                1,
+            )
+            self.assertEqual(markdown.read_text(encoding="utf-8"), before)
+            self.assertNotIn("TC-ZC-006", before)
+
+            self.assertEqual(
+                self._sync(
+                    markdown,
+                    excel,
+                    (
+                        "--assign-ids",
+                        "--id-prefix",
+                        "TC-ZC",
+                        "--default-design-method",
+                        "等价类划分",
+                    ),
+                ),
+                0,
+            )
+            content = markdown.read_text(encoding="utf-8")
+            self.assertIn("[TC-ZC-006]", content)
+            self.assertNotIn("TC-ZC-003", content)
+            self.assertIn("反向-新增无号场景-P2", content)
+            self.assertEqual(validate(content), [])
+            self.assertEqual(validate_excel_file(excel), [])
+            sheet = load_workbook(excel)["测试用例"]
+            self.assertEqual(
+                [sheet.cell(row, 2).value for row in range(3, 6)],
+                ["TC-ZC-001", "TC-ZC-006", "TC-ZC-005"],
+            )
+            self.assertEqual(
+                [sheet.cell(row, 5).value for row in range(3, 6)],
+                ["等价类划分", "等价类划分", "错误推测法"],
+            )
+            self.assertEqual(sheet["C3"].value, "[注册模块]_[注册]_[合法手机号]_[提交成功]")
+
+    def test_sync_first_time_excel_requires_default_design_method(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown = directory_path / "cases.md"
+            excel = directory_path / "cases.xlsx"
+            markdown.write_text(
+                render_markdown(normalize_baseline(valid_ir())).replace(
+                    "[TC-ZC-001]", "[TC-NEW]"
+                ),
+                encoding="utf-8",
+            )
+            before = markdown.read_text(encoding="utf-8")
+            self.assertEqual(
+                self._sync(
+                    markdown, excel, ("--assign-ids", "--id-prefix", "TC-ZC")
+                ),
+                1,
+            )
+            self.assertFalse(excel.exists())
+            self.assertEqual(markdown.read_text(encoding="utf-8"), before)
+
+            self.assertEqual(
+                self._sync(
+                    markdown,
+                    excel,
+                    (
+                        "--assign-ids",
+                        "--id-prefix",
+                        "TC-ZC",
+                        "--default-design-method",
+                        "等价类划分",
+                    ),
+                ),
+                0,
+            )
+            self.assertTrue(excel.exists())
+            self.assertEqual(validate_excel_file(excel), [])
+            self.assertEqual(load_workbook(excel)["测试用例"]["E3"].value, "等价类划分")
+
+    def test_sync_write_failure_rolls_back_both_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            code, _, markdown, excel = self._render(directory_path, valid_ir())
+            self.assertEqual(code, 0)
+            before_markdown = markdown.read_bytes()
+            before_excel = excel.read_bytes()
+            original_replace = validation_utils.replace_file_atomic
+            calls = {"count": 0}
+
+            def flaky_replace(source, target):
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise PermissionError(13, "locked", str(target))
+                return original_replace(source, target)
+
+            with mock.patch.object(
+                validation_utils, "replace_file_atomic", side_effect=flaky_replace
+            ):
+                self.assertEqual(self._sync(markdown, excel), 1)
+
+            self.assertEqual(markdown.read_bytes(), before_markdown)
+            self.assertEqual(excel.read_bytes(), before_excel)
+            self.assertEqual(
+                sorted(path.name for path in directory_path.iterdir()),
+                ["cases.md", "cases.xlsx", "ir.json"],
+            )
+
+    def test_bundle_detects_id_trace_and_pending_mismatch(self):
+        mutations = (
+            ("TC-ZC-001", "TC-ZC-099", "TC-ZC-099"),
+            ("手机号必须为11位数字", "手机号必须为10位数字", "rule"),
+            ("超时是否重试？", "超时是否重试或失败？", "question"),
+        )
+        for old, new, marker in mutations:
+            with self.subTest(marker=marker):
+                with tempfile.TemporaryDirectory() as directory:
+                    directory_path = Path(directory)
+                    code, _, markdown, excel = self._render(
+                        directory_path, pending_ir()
+                    )
+                    self.assertEqual(code, 0)
+                    markdown.write_text(
+                        markdown.read_text(encoding="utf-8").replace(old, new),
+                        encoding="utf-8",
+                    )
+                    errors = validate_bundle(
+                        markdown_path=markdown, excel_path=excel
+                    )
+                self.assertTrue(errors)
+                if marker == "TC-ZC-099":
+                    self.assertTrue(
+                        any(marker in error for error in errors), errors
+                    )
+                elif marker == "rule":
+                    self.assertTrue(
+                        any(
+                            "TRACE-REG-001" in error and "rule" in error
+                            for error in errors
+                        ),
+                        errors,
+                    )
+                else:
+                    self.assertTrue(
+                        any(
+                            "TRACE-REG-Q01" in error and "question" in error
+                            for error in errors
+                        ),
+                        errors,
+                    )
+
+    def test_markdown_only_render_without_openpyxl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            baseline = directory_path / "ir.json"
+            markdown = directory_path / "cases.md"
+            baseline.write_text(
+                json.dumps(valid_ir(), ensure_ascii=False), encoding="utf-8"
+            )
+            original_import = __import__
+
+            def blocked_import(name, *args, **kwargs):
+                if name == "openpyxl" or name.startswith("openpyxl."):
+                    raise ImportError("openpyxl unavailable")
+                return original_import(name, *args, **kwargs)
+
+            with mock.patch("builtins.__import__", side_effect=blocked_import):
+                code = render_cases_main(
+                    [
+                        "--baseline",
+                        str(baseline),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(validate(markdown.read_text(encoding="utf-8")), [])
+
     def test_bundle_reports_cross_format_field_diff(self):
         with tempfile.TemporaryDirectory() as directory:
             code, _, markdown, excel = self._render(Path(directory), valid_ir())
@@ -1169,6 +1606,35 @@ class CaseBaselineTests(unittest.TestCase):
         assigned = assign_missing_ids(cases)
         self.assertEqual(assigned, ["TC-ZC-004"])
         self.assertNotIn("TC-ZC-002", [case["id"] for case in cases])
+
+    def test_assign_ids_infers_prefix_and_keeps_ids_unique(self):
+        cases = [
+            {"id": "TC-A-001"},
+            {"id": "TC-A-002"},
+            {"id": "TC-B-001"},
+            {"id": "TC-NEW"},
+            {"id": "NEW"},
+        ]
+        assigned = assign_missing_ids(cases)
+        self.assertEqual(assigned, ["TC-A-003", "TC-A-004"])
+        self.assertEqual(len({case["id"] for case in cases}), len(cases))
+
+    def test_renumber_multi_prefix_syncs_links(self):
+        cases = [
+            {"id": "TC-A-010", "module": "M", "type": "功能测试", "group": ""},
+            {"id": "TC-B-020", "module": "M", "type": "功能测试", "group": ""},
+        ]
+        traceability = [
+            {
+                "id": "TRACE-1",
+                "status": "已覆盖",
+                "case_ids": ["TC-A-010", "TC-B-020"],
+            }
+        ]
+        mapping = renumber_cases(cases, traceability)
+        self.assertEqual([case["id"] for case in cases], ["TC-A-001", "TC-B-001"])
+        self.assertEqual(mapping["TC-B-020"], "TC-B-001")
+        self.assertEqual(traceability[0]["case_ids"], ["TC-A-001", "TC-B-001"])
 
     def test_renumber_continuous_for_single_prefix_and_buckets_for_multi(self):
         cases = [{"id": "TC-ZC-005"}, {"id": "TC-ZC-009"}]
@@ -2006,21 +2472,90 @@ class ExcelV2RenderTests(unittest.TestCase):
         self.assertGreaterEqual(height, 24)
         self.assertLessEqual(height, 409)
 
-    def test_formula_like_text_stays_plain_and_real_formulas_are_rejected(self):
-        ir = valid_ir()
-        ir["cases"][0]["test_data"] = ["=1+1"]
+    def test_formula_like_input_remains_plain_text(self):
+        ir = pending_ir()
+        ir["traceability"][0].update(
+            {
+                "id": "=1+1",
+                "source": "+1+1",
+                "location": "-1+1",
+                "rule": "+1+1",
+            }
+        )
+        ir["cases"][0]["traceability_refs"] = ["=1+1"]
+        ir["cases"][0].update(
+            {
+                "title": "-1+1",
+                "pre_operations": ["@SUM(1)"],
+                "test_data": ["=1+1"],
+                "steps": ["+1+1"],
+                "expected_results": ["-1+1"],
+                "post_operations": ["@SUM(1)"],
+            }
+        )
+        ir["meta"]["coverage"] = "=1+1"
+        ir["meta"]["notes"] = "+1+1"
+        ir["traceability"][1].update(
+            {
+                "source": "+1+1",
+                "location": "-1+1",
+                "issue": "=1+1",
+                "assumption": "+1+1",
+                "question": "-1+1",
+            }
+        )
+
+        workbook = build_workbook_from_ir(ir)
+        text_cells = {
+            "测试用例": ("A3", "C3", "G3", "H3", "I3", "J3", "K3"),
+            "生成说明": ("B5", "B6"),
+            "需求追溯": ("A3", "B3", "C3", "D3", "E3"),
+            "待确认项": ("A3", "B3", "C3", "D3", "E3", "F3"),
+        }
+        for sheet_name, cells in text_cells.items():
+            for cell in cells:
+                with self.subTest(sheet=sheet_name, cell=cell):
+                    self.assertEqual(
+                        workbook[sheet_name][cell].data_type,
+                        "s",
+                        f"{sheet_name}!{cell} 必须按纯文本保存",
+                    )
+
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "cases.xlsx"
-            save_workbook_atomic(build_workbook_from_ir(ir), path)
-            parsed, errors, _ = parse_excel_to_ir(path)
-            self.assertEqual(errors, [])
-            self.assertEqual(parsed["cases"][0]["test_data"], ["=1+1"])
+            save_workbook_atomic(workbook, path)
+            self.assertEqual(validate_excel_file(path), [])
+            loaded = load_workbook(path)
+            self.assertEqual(loaded["测试用例"]["C3"].value, "-1+1")
+            self.assertEqual(loaded["测试用例"]["H3"].value, "=1+1")
+            self.assertEqual(loaded["生成说明"]["B5"].value, "=1+1")
+            self.assertEqual(loaded["待确认项"]["F3"].value, "-1+1")
 
             workbook = build_workbook_from_ir(valid_ir())
             workbook["测试用例"]["G3"] = "=1+1"
             save_workbook_atomic(workbook, path)
             _, errors, _ = parse_excel_to_ir(path)
         self.assertTrue(any("包含公式" in error for error in errors), errors)
+
+    def test_workbook_lock_is_friendly_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            path = directory_path / "cases.xlsx"
+            original_replace = os.replace
+
+            def locked_replace(source, target):
+                if Path(target) == path:
+                    raise PermissionError(13, "locked", str(path))
+                return original_replace(source, target)
+
+            with mock.patch(
+                "create_excel_cases.os.replace", side_effect=locked_replace
+            ):
+                with self.assertRaises(FileLockedError) as context:
+                    save_workbook_atomic(build_workbook_from_ir(valid_ir()), path)
+            self.assertIn("文件被占用", str(context.exception))
+            self.assertIn(str(path), str(context.exception))
+            self.assertEqual(list(directory_path.iterdir()), [])
 
     def test_info_sheet_uses_shared_row_height_and_strips_sheet_name(self):
         ir = valid_ir()

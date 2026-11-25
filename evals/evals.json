@@ -10,11 +10,11 @@
     {
       "id": "markdown-field-list-format",
       "prompt": "根据以下需求生成 Markdown 测试用例；上线日期为 2026-09-02：在设置页添加名称和描述后保存，系统提示添加成功且新增条目显示在列表中。",
-      "expected_output": "前置条件仅有一项时，字段标题下使用无序列表；测试步骤和预期结果包含多项时，字段标题下从 1. 开始使用有序列表。",
+      "expected_output": "前置操作仅有一项时，字段标题下使用无序列表；测试步骤和预期结果包含多项时，字段标题下从 1. 开始使用有序列表。",
       "files": [],
       "expectations": [
-        "每个前置条件、测试步骤和预期结果字段的直接子列表项数为 1 时，内容使用缩进无序列表。",
-        "每个前置条件、测试步骤和预期结果字段的直接子列表项数大于 1 时，内容使用从 1. 开始且序号连续的缩进有序列表。",
+        "每个前置操作、测试步骤和预期结果字段的直接子列表项数为 1 时，内容使用缩进无序列表。",
+        "每个前置操作、测试步骤和预期结果字段的直接子列表项数大于 1 时，内容使用从 1. 开始且序号连续的缩进有序列表。",
         "生成的 Markdown 文件通过 scripts/validate_markdown_lists.py 校验。"
       ]
     },
@@ -63,13 +63,13 @@
     {
       "id": "same-requirement-multiple-formats",
       "prompt": "同一份需求请同时输出 Markdown 和 Excel 两种测试用例，日期 2026-11-25，需求名称：优惠券创建。需求：运营人员输入名称和折扣后可创建优惠券；名称必填；成功后列表显示新优惠券。",
-      "expected_output": "先建立并共享需求事实、规则优先级、待确认项、追溯矩阵及抽象测试意图作为共同业务测试设计基线；再分别读取 Markdown 与 Excel 专属规范和模板，独立编排、细化和渲染用例。不得将一种格式的已成形用例集、字段映射或格式化步骤直接转换、复制或作为另一格式的数据源；两种格式的用例粒度和数量可以不同。分别校验并保存两种格式，汇报两个产物。",
+      "expected_output": "把共享业务设计、追溯关系与 Markdown/Excel 各自所需字段统一写入单一临时合并 IR，由 render_cases.py 确定性渲染两种格式；用例 ID 与追溯 100% 对齐，交付目录不保留临时 IR 或多余 JSON。",
       "files": [],
       "expectations": [
-        "先共享共同业务测试设计基线，再按格式独立编排；不复用或转换 Markdown/Excel 的已成形用例数据、字段映射或格式化步骤。",
-        "多格式共享需求事实、规则优先级、待确认项、追溯矩阵和抽象测试意图，保持业务口径与覆盖范围一致。",
-        "Markdown 与 Excel 分别遵循自己的字段、用例拆分和输出规范；因格式规则导致的粒度和数量不同可接受。",
-        "两个格式产物分别通过各自指定的校验脚本后交付。"
+        "只编写一份临时合并 IR，包含两种格式所需字段；不手写同构副本，也不对单格式成稿做有损互转。",
+        "Markdown 与 Excel 均由 render_cases.py 从同一 IR 渲染，用例 ID、追溯表与引用完全一致。",
+        "交付目录只保留 .md/.xlsx；临时 IR 通过 --cleanup-baseline 清理，不出现多余 JSON。",
+        "两种格式通过全量校验；双格式渲染已内置跨格式校验。"
       ]
     },
     {
@@ -84,11 +84,11 @@
     },
     {
       "id": "markdown-required-fields-and-count",
-      "prompt": "使用 scripts/validate_markdown_lists.py 分别校验缺少前置条件、重复预期结果、用例数量声明与真实任务项数量不一致的 Markdown 文件。",
+      "prompt": "使用 scripts/validate_markdown_lists.py 分别校验缺少前置操作、重复预期结果、用例数量声明与真实任务项数量不一致的 Markdown 文件。",
       "expected_output": "三种文件均校验失败，分别指出缺失字段、重复字段和数量不一致。",
       "files": [],
       "expectations": [
-        "缺少前置条件的文件校验失败并定位对应字段。",
+        "缺少前置操作的文件校验失败并定位对应字段。",
         "重复预期结果的文件校验失败并定位对应字段。",
         "数量不一致的文件校验失败，数量按真实用例任务项计算。"
       ]
@@ -117,11 +117,11 @@
     {
       "id": "explicit-filename-without-release-date",
       "prompt": "项目没有上线日期概念。需求：运营人员在优惠券页面输入名称和折扣后创建优惠券，名称必填，成功后列表显示新优惠券。请生成 Markdown 测试用例，输出文件明确指定为 `优惠券灰度验收.md`，不要自行补日期。",
-      "expected_output": "按用户指定完整文件名保存为 `优惠券灰度验收.md`；文档标题和追溯矩阵中的日期使用 `未指定日期`，不将文件名或目录内容当作日期依据。",
+      "expected_output": "按用户指定完整文件名保存为 `优惠券灰度验收.md`；文档标题和需求追溯表中的日期使用 `未指定日期`，不将文件名或目录内容当作日期依据。",
       "files": [],
       "expectations": [
         "用户明确指定完整文件名时原样使用，不自动改成 `测试用例-未指定日期-...`。",
-        "标题和追溯矩阵中的日期写 `未指定日期`，不因文件名或目录推断日期。",
+        "标题和需求追溯表中的日期写 `未指定日期`，不因文件名或目录推断日期。",
         "不因缺少上线日期阻塞生成或擅自编造日期。"
       ]
     },
@@ -138,18 +138,19 @@
     {
       "id": "multi-format-serial-fallback",
       "prompt": "同一需求要求生成 Markdown 和 Excel，但当前平台没有可调用的子代理或并行任务工具。",
-      "expected_output": "说明无法并行的原因，主代理串行生成两种格式，复用统一需求事实与追溯矩阵，分别校验。",
+      "expected_output": "当前平台无并行工具时，明确说明后直接串行编写单一临时 IR：小规模（≤30 条）或单模块直接串行，多模块大规模才按模块拆分且仍由主代理合并；不得因无并行工具而跳过设计或校验。",
       "files": [],
       "expectations": [
-        "明确说明因无并行工具而串行执行。",
-        "串行执行不重复分析原始材料。",
-        "两种格式分别生成并按可用能力校验。"
+        "明确说明因无并行任务工具而串行执行。",
+        "串行执行不重复分析原始材料，仍写入单一临时 IR。",
+        "小规模直接串行，多模块 >30 条才按功能模块拆分候选内容，由主代理合并。",
+        "两种格式从同一 IR 渲染并完成校验。"
       ]
     },
     {
       "id": "missing-validator-unvalidated-delivery",
       "prompt": "生成 Markdown 用例时，技能目录中的 scripts/validate_markdown_lists.py 不存在。",
-      "expected_output": "按 SKILL.md 第 4 步告知缺失脚本及影响，经用户选择后跳过校验继续生成，并在交付中标注未校验。",
+      "expected_output": "按 SKILL.md 第 5 步告知缺失脚本及影响，经用户选择后跳过校验继续生成，并在交付中标注未校验。",
       "files": [],
       "expectations": [
         "明确报告缺失的校验脚本路径。",
@@ -171,34 +172,82 @@
     {
       "id": "requirement-traceability-in-both-formats",
       "prompt": "根据《注册需求.md》2.1 节生成 Markdown 和 Excel 用例：手机号必须为 11 位数字。",
-      "expected_output": "先创建需求追溯矩阵，再生成 Markdown 和 Excel；两种格式的追溯均由矩阵渲染，需求/追踪 ID 仅填写材料原文的正式编号且允许为空，并携带矩阵完成校验。",
+      "expected_output": "建立内嵌追溯条目（注册需求.md / 2.1 / 手机号 11 位规则），由用例引用后转为已覆盖；Markdown 用例引用短 ID 并在文末输出 ## 需求追溯，Excel A 列与 需求追溯 工作表同源；两种格式由同一 IR 渲染并交叉核对。",
       "files": [],
       "expectations": [
-        "矩阵记录注册需求.md、2.1 节、手机号 11 位规则及对应的 Markdown 标题、Excel 用例 ID。",
-        "Markdown 标题下和 Excel 备注首行均与矩阵条目一致；材料没有正式编号时需求/追踪 ID 为空。",
-        "缺少矩阵、矩阵关联缺失或追溯内容被手工改写时校验失败。"
+        "追溯条目记录注册需求.md、2.1 节、手机号 11 位规则，最终状态为已覆盖且关联对应用例。",
+        "Markdown 引用行为 `[TC-ID] 追溯: TRACE-ID`，Excel A 列与 `需求追溯` 工作表内容一致。",
+        "引用、关联用例列与正文双向闭环；缺表、缺关联或手工改写时校验失败。"
       ]
     },
     {
       "id": "multi-rule-traceability-and-final-bundle-validation",
       "prompt": "同一条用例同时验证规则 A 和规则 B，生成 Markdown 与 Excel 测试用例。平台支持并行任务。",
-      "expected_output": "初始矩阵把两条规则记为待覆盖；各格式并行设计后由主代理将同一用例关联两条规则并定稿。Markdown 标题下、Excel 备注开头均连续输出两条追溯；完成只读格式校验后执行跨格式追溯总校验。",
+      "expected_output": "同一用例在引用行/A 列连续引用两个 TRACE-ID，顺序与追溯表一致；由单一 IR 经 render_cases.py 渲染双格式并全量校验；分步生成或单格式校验后再执行跨格式互校。",
       "files": [],
       "expectations": [
-        "同一用例可关联多个追溯条目，不二选一。",
-        "子任务不使用临时矩阵声明最终校验成功。",
-        "并行仅发生在独立设计和矩阵定稿后的只读格式校验阶段。"
+        "同一用例关联两条追溯条目，不二选一。",
+        "Markdown 引用行与 Excel A 列均输出两条 TRACE-ID，顺序与追溯表一致。",
+        "render_cases.py 双格式渲染已内置跨格式校验；分步生成时再执行 validate_traceability_bundle.py。"
       ]
     },
     {
       "id": "maintain-existing-output-with-confirmed-metadata",
       "prompt": "需求变更，需要更新既有的 Markdown 和 Excel 用例；现有目标文件标题中日期为 2026-11-19，当前材料没有重复写日期。",
-      "expected_output": "进入维护模式，读取指定旧用例与变更材料，复用目标文件中已确认的日期并直接覆盖更新；同步长期保留的追溯矩阵和产物追溯文本后重新校验。",
+      "expected_output": "进入维护模式，用 case_baseline.py export 从既有 Markdown/Excel 无损还原合并 IR；复用目标文件已确认日期，按变更增删用例后由 render_cases.py 或 sync_artifacts.py 覆盖更新；确认清空待确认项后 Markdown 小节与 Excel Sheet 自动消失，ID 保持稳定。",
       "files": [],
       "expectations": [
-        "不把新建覆盖确认规则误用于用户明确提出的维护请求。",
+        "用户提出维护请求即授权覆盖指定目标文件，不重复套用新建覆盖确认。",
         "日期仅从指定目标文件的既有元数据复用，不从目录或历史记忆推断。",
-        "更新后保留矩阵，不删除校验依据。"
+        "export 无损还原 IR；清空待确认项后 `### 待确认项` 与 `待确认项` Sheet 消失，ID 保留跳号不重排。"
+      ]
+    },
+    {
+      "id": "markdown-manual-edit-assign-ids-and-renumber",
+      "prompt": "已有一份 Markdown 与 Excel 用例（TC-DEMO-001..003，其中 002 已删除形成跳号）。现在人工在 Markdown 中间插入一条无 ID 的新用例，并希望同步补号到两种格式、定稿前再重排编号。",
+      "expected_output": "用 sync_artifacts.py --from-markdown ... --assign-ids 保留跳号并为新用例分配现有最大值 +1；带 --excel 时缺 design_method 需 --default-design-method；定稿前 --renumber 连续编号并同步两种格式，最后通过跨格式校验。",
+      "files": [],
+      "expectations": [
+        "新用例允许写 [TC-NEW]、[NEW] 或省略 ID（`> 追溯: ...`），补号后不覆盖已有跳号。",
+        "新 ID 取现有最大值 +1；删除用例留下的空号保留。",
+        "带 --excel 且存在缺失 design_method 的用例时先阻断，补默认设计方法或导出 IR 补全后再写入。",
+        "仅在定稿/提测前执行 --renumber；重排后 Markdown 与 Excel 用例 ID 连续且一致。",
+        "最终 validate_traceability_bundle.py 通过。"
+      ]
+    },
+    {
+      "id": "post-operations-isolated-from-steps",
+      "prompt": "需求：测试账号可创建临时报表并导出文件，导出成功后需删除临时报表和本地导出文件。生成 Markdown 和 Excel 用例。",
+      "expected_output": "清理动作只写入后置操作/K 列，测试步骤只描述被测业务动作；若撤销/回滚本身是被测功能，才在步骤中体现。",
+      "files": [],
+      "expectations": [
+        "创建与导出动作写入测试步骤，不留清理指令。",
+        "删除临时报表与本地文件写入后置操作（Excel K 列），不重复出现在测试步骤。",
+        "后置操作缺失时用例不完整；清理不是业务功能时不写成预期结果。"
+      ]
+    },
+    {
+      "id": "pending-questions-convergence-and-ddl-exemption",
+      "prompt": "需求：为订单表新增来源字段并加普通索引加速查询；订单处理任务读取该字段，材料未说明来源为空时的处理与超时重试。上线还包含初始化字典 SQL。生成测试用例。",
+      "expected_output": "只把影响主判定/核心边界/落库结果的信息记入待确认（来源为空、超时重试），按风险排序并收敛在 3~5 项；初始化字典与普通索引不单列运维用例，影响归并到订单处理任务。",
+      "files": [],
+      "expectations": [
+        "待确认项聚焦来源为空、查询超时等业务影响，按风险排序且单模块不超过 3~5 项。",
+        "不单独生成 SHOW INDEX / SELECT 配置表类运维用例。",
+        "普通索引与初始化字典的影响归并到读写订单表的业务功能点及回归验证。",
+        "不把材料未提及的纯运维 SQL、非核心字段主动发散成待确认。"
+      ]
+    },
+    {
+      "id": "confirmation-subconditions-and-adjacent-boundary",
+      "prompt": "用户确认待确认项：'无记录 / 字段为空 / 查询超时' 三种情况均按未命中处理；同时确认时间边界为正好 6 个月。请更新用例。",
+      "expected_output": "逐项拆解三个并列子条件并落到用例；边界上点确认为 6 个月后，离点用例紧邻为 6 个月零 1 天；更新 Markdown 与 Excel 并重新校验。",
+      "files": [],
+      "expectations": [
+        "无记录、字段为空、查询超时分别形成可判定用例，不只写一条笼统用例。",
+        "确认待确认项转为已覆盖并补充 rule，删除 issue/assumption/question。",
+        "6 个月为上点，离点使用 6 个月零 1 天，不使用无关中间值。",
+        "更新后 Markdown 与 Excel 一致且通过跨格式校验。"
       ]
     }
   ]
