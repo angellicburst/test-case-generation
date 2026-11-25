@@ -20,10 +20,9 @@ description: >
 
 - 材料整文件不可读，或仅部分可读时，明确指出文件、受影响章节与原因，询问补充或确认忽略；不得静默跳过。
 - 识别需求名称、上线日期、测试范围和输出格式；同时提供需求与设计文档时，按[测试规则](references/test-rules.md#多源材料与真实性)的“多源材料基准”处理。
-- 未指定格式时默认 Markdown。上线日期标准格式 `YYYY-MM-DD`；无法确定且用户同意时写 `未指定日期`，不得从文件名、目录或当前日期推断。项目无日期概念时，由用户指定文件名或替代标识。
-- 缺失上线日期、输出目录等元数据与覆盖确认、待确认问题合并为一次提问；用户希望直接出稿时可先用 `未指定日期` 起草并在汇报中说明。交互细则见[测试规则](references/test-rules.md#元数据交互)。
-- 仅当核心业务规则或测试范围缺失、冲突到无法判断时，才暂停设计请求澄清；局部细节缺失按[测试规则](references/test-rules.md)记入 `待确认`。
-- 新建生成时不读取历史用例；维护模式才读取用户指定的目标文件与需求变更。
+- 未指定格式时默认 Markdown。上线日期为 `YYYY-MM-DD` 或 `未指定日期`；不得从文件名、当前日期或非约定目录推断，无日期概念时由用户指定文件名或替代标识；结构化批次目录（如 `01-PRD/{YYYY-MM-DD}/`）日期仅作候选并须确认。缺失日期/目录、覆盖确认与待确认合并提问，细则见[测试规则](references/test-rules.md#元数据交互)。
+- 仅核心规则/范围缺失冲突时暂停澄清；局部细节记入 `待确认`。
+- 新建不读历史用例；同名文件存在须先确认覆盖（自动模式或 Git 跟踪也不得绕过），维护模式才读目标文件与变更。
 
 ### 2. 分配需求任务
 
@@ -40,7 +39,7 @@ description: >
 
 ### 4. 编写临时合并 IR
 
-- 按[需求追溯与待确认规范](references/traceability-matrix.md)建立条目，写入**单一临时 JSON**（结构见 `assets/example-cases-baseline.json`）：`meta`、`traceability`、`cases`。
+- 按[追溯规范](references/traceability-matrix.md)建条目，将**单一临时 JSON**及维护临时脚本写入系统临时目录（`%TEMP%`/`/tmp`，勿放交付目录或工作区），结构见 `assets/example-cases-baseline.json`。
 - 用例 ID 为 `TC-{需求简写}-{3 位流水号}`；需求简写由 LLM 从需求名称核心词提炼 2~8 位大写字母/数字，同一需求文档统一前缀，不绑定模块名。ID 是永久主键：删除允许跳号，新增取现有最大值 +1；仅定稿前允许 `--renumber` 重排。完整规则见[测试规则](references/test-rules.md#用例-id-稳定策略)。
 - 规模策略：单模块、预计 ≤30 条或维护更新，默认直接串行编写；多模块大规模 >30 条且平台支持并行时，按功能模块并行设计片段，由主代理合并去重后统一渲染。
 - `cases` 每条包含 `id`、`module`、`type`、`group`（可空）、`polarity`（正向/反向）、`title`、`design_method`、`priority`、`pre_operations`、`test_data`、`steps`、`expected_results`、`post_operations`、`traceability_refs`；`design_method` 仅在生成 Excel 时必填，纯 Markdown 可空；`meta.case_count` 不得手填（按 `cases` 自动计算）；已移除 `requirement_id` 与用例级 `notes`。数组每项填纯文本，不写 `- ` 或 `1. ` 前缀；渲染时单项原样输出，多项自动编号。
@@ -50,14 +49,8 @@ description: >
 
 渲染前做最小预检（只检查本次要用的能力）：
 
-- Excel：`python -c "import openpyxl"`；失败时说明无法生成与校验 Excel，并给出“安装依赖 / 仅输出 Markdown”选项。纯 Markdown 不受影响。
-- 校验脚本位于 `{技能根目录}/scripts/`，不得按当前项目工作目录拼接。平台无法执行命令时跳过预检：Markdown 可按规范生成并在汇报中标注“未校验”；Excel 不具备生成条件，应向用户说明。
-
-```bash
-python "{技能根目录}/scripts/render_cases.py" --baseline "<临时ir.json>" [--markdown "<输出.md>"] [--excel "<输出.xlsx>"] --cleanup-baseline
-```
-
-`--markdown` 与 `--excel` 至少指定一个。脚本统一渲染、全量校验并原子写入，全部通过后删除临时 IR；输出已存在时默认拒绝覆盖，用户确认后追加 `--force`。脚本可执行时，失败须按报错修正 IR 后重跑，不得交付未校验产物。
+- 能力异常分级（脚本位于 `{技能根目录}/scripts/`，禁按项目目录拼接）：① 缺 `openpyxl`（`python -c "import openpyxl"` 失败）→ 不可生成/校验 Excel，给出“安装依赖 / 仅出 Markdown”选项（纯 MD 不受影响）；② 校验脚本缺失 → 报缺失路径与影响，经用户确认后标注“未校验”继续（不得伪称通过）；③ 平台无法执行命令 → 跳过预检，MD 标注“未校验”，Excel 说明不具备生成条件。
+- 执行[常用命令](#常用命令)中的 `render_cases.py ... --cleanup-baseline`：统一渲染、全量校验并原子写入，通过后删临时 IR；输出已存在时拒绝覆盖，确认后加 `--force`。失败须修正 IR 重跑，不得交付未校验产物；遇 Excel/WPS 占用时脚本已回滚并保留临时 IR，应等用户关闭后原样重跑，严禁拆写单格式或在交付目录留候选文件。
 
 写入后按[交付前检查](#交付前检查)复核业务语义；格式校验通过不代表业务正确。
 
@@ -65,7 +58,7 @@ python "{技能根目录}/scripts/render_cases.py" --baseline "<临时ir.json>" 
 
 - 汇报每种格式的文件名、用例数量、可点击路径，并逐项展示 `待确认` 条目的来源/定位、未明确项、测试假设和确认问题；无待确认项时明确说明。
 - 交付目录只保留最终 `.md` / `.xlsx`，不保留临时 IR 或 JSON 矩阵。
-- 确认变更：用 `case_baseline.py export` 从现有产物导出 IR，编辑后以 `render_cases.py --assign-ids --force --cleanup-baseline` 重新渲染；或直接人工修改 Markdown 后用 `sync_artifacts.py` 补号、重排并同步两种格式（规则见[测试规则](references/test-rules.md#确认维护)）。
+- 确认变更：批量确认/精确 `design_method`/改 `meta` 用 `case_baseline.py export` 导出到系统临时目录后以 `render_cases.py --assign-ids --force --cleanup-baseline` 渲染；微调 Markdown 文案或简单增删用 `sync_artifacts.py` 同步（见[测试规则](references/test-rules.md#确认维护)）。
 - 确认的规则转 `已覆盖`；无需覆盖的条目及相应用例删除；用例数量、追溯表与引用在两种格式中保持一致。
 
 ## 常用命令
@@ -73,13 +66,14 @@ python "{技能根目录}/scripts/render_cases.py" --baseline "<临时ir.json>" 
 ```bash
 python "{技能根目录}/scripts/render_cases.py" --baseline "<ir.json>" [--markdown "<输出.md>"] [--excel "<输出.xlsx>"] [--assign-ids] [--force] [--cleanup-baseline]
 python "{技能根目录}/scripts/case_baseline.py" export [--markdown "<文件.md>"] [--excel "<文件.xlsx>"] --output "<ir.json>" [--force]
+python "{技能根目录}/scripts/case_baseline.py" inspect [--markdown "<文件.md>"] [--excel "<文件.xlsx>"] [--baseline "<ir.json>"] [--ids ID1,ID2]
 python "{技能根目录}/scripts/sync_artifacts.py" --from-markdown "<文件.md>" [--excel "<文件.xlsx>"] [--assign-ids] [--renumber] [--default-design-method "等价类划分"]
 python "{技能根目录}/scripts/validate_markdown_lists.py" "<文件.md>" [--baseline "<ir.json>"] [--fix]
 python "{技能根目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" [--sheet-name "测试用例"]
 python "{技能根目录}/scripts/validate_traceability_bundle.py" [--markdown "<文件.md>"] [--excel "<文件.xlsx>"] [--baseline "<ir.json>"] [--coverage-only]
 ```
 
-`render_cases.py` 与 `case_baseline.py export` 的 Markdown/Excel 至少指定一个；跨格式校验脚本至少提供一个文件，`--coverage-only` 必须同时提供 `--markdown` 与 `--excel`。
+`render_cases.py`、`export`、`inspect` 与跨格式校验至少指定一源；抽查产物优先 `inspect`；`--coverage-only` 须同传双格式。
 
 ## 格式索引
 

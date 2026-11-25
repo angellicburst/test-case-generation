@@ -44,7 +44,7 @@ test-case-generation/
 │   ├── excel-test-case-template.xlsx
 │   └── example-cases-baseline.json  # 合并 IR 结构示例
 ├── scripts/
-│   ├── case_baseline.py           # IR 校验、导出、补号、重排
+│   ├── case_baseline.py           # IR 校验、导出、抽查、补号、重排
 │   ├── render_cases.py            # 从临时 IR 一键渲染 Markdown / Excel
 │   ├── render_markdown_cases.py   # Markdown 渲染器
 │   ├── create_excel_cases.py      # Excel 工作簿构建器
@@ -86,6 +86,13 @@ python "{本目录}/scripts/case_baseline.py" export --markdown "<文件.md>" --
 python "{本目录}/scripts/case_baseline.py" check --baseline "<ir.json>"
 ```
 
+抽查现有产物的用例分布与单条详情（只读，不改文件）：
+
+```bash
+python "{本目录}/scripts/case_baseline.py" inspect --markdown "<文件.md>"
+python "{本目录}/scripts/case_baseline.py" inspect --excel "<文件.xlsx>" --ids TC-XXX-001,TC-XXX-002
+```
+
 人工改完 Markdown 后补号、同步 Excel（存在缺失设计方法的用例时需提供，如新增用例或首次由 Markdown 生成 Excel）：
 
 ```bash
@@ -102,6 +109,8 @@ python "{本目录}/scripts/validate_traceability_bundle.py" --markdown "<文件
 ```
 
 `render_cases.py` 与 `sync_artifacts.py` 都会先渲染到临时文件、全量校验，再备份并原子替换；任一写入失败会回滚并提示文件占用。`render_cases.py` 检测到输出已存在时默认拒绝覆盖，用户确认后追加 `--force`；`sync_artifacts.py` 属维护模式，用户提出更新即授权覆盖指定文件。
+
+**Excel 被占用时**：脚本会提示“文件被占用”并回滚，临时 IR 保留在原处。关闭 Excel/WPS 后原样重跑同一条命令即可，不要改成只写 Markdown 或另存候选文件——那会让两种格式不同步。只读文件与目录权限不足会分别提示“文件不可写”与“输出目录不可写”。
 
 ## 运行环境
 
@@ -139,6 +148,10 @@ python "{本目录}/scripts/validate_traceability_bundle.py" --markdown "<文件
 **Excel 校验失败**
 
 优先检查：工作表是否齐全、主表是否恰好 `A1:K1` 合并、表头是否为 11 列 v2 顺序、是否冻结 `A3`、筛选范围是否正确、是否存在公式、`生成说明` 的 `用例数量` 是否与实际行数一致、追溯表是否至少 1 行数据。
+
+**写入时提示文件被占用**
+
+Excel/WPS 打开着目标文件时，Windows 会阻止替换。关闭程序后原样重跑同一条命令；脚本已回滚且保留了临时 IR，不需要重新生成。用 `case_baseline.py inspect` 可先确认当前产物内容是否已是期望版本。
 
 **终端输出中文乱码**
 

@@ -49,18 +49,9 @@
 - 所有单元格按纯文本写入；第 1、2 行与数据行出现公式均不合规，`=1+1`、`+1+1`、`-1+1`、`@SUM(1)` 等按文本保存。
 - IR 的 `meta`、`traceability`、`cases` 全部字段均不得保留 `[待确认]` 标记；`meta.case_count` 不得手填，用例数量按 `cases` 长度自动计算。
 - 用例 ID 与标题在同一工作簿内唯一；标题不得以 `正向-`/`反向-` 开头或以 `-P0..P4` 结尾（极性、优先级由独立字段表达）；追溯 ID 在追溯表与待确认表中不得重复。
-- 单条用例至少关联一个追溯条目，且不得引用 `待确认` 条目。
-- 模板 `assets/excel-test-case-template.xlsx` 仅示意结构，生成产物必须替换全部示例数据。
-- Excel 特有的前置/后置、数据隔离与断言要求，按[测试规则](test-rules.md)与[需求追溯规范](traceability-matrix.md)执行。
+- 模板 `assets/excel-test-case-template.xlsx` 仅示意结构，生成产物必须替换全部示例数据；前置/后置、隔离、断言与追溯见[测试规则](test-rules.md)和[需求追溯规范](traceability-matrix.md)。
 
 ## 生成与校验
 
-```bash
-python "{技能根目录}/scripts/render_cases.py" --baseline "<ir.json>" --excel "<输出.xlsx>" [--force] [--cleanup-baseline]
-python "{技能根目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" [--sheet-name "测试用例"]
-```
-
-- `render_cases.py` 先校验 IR，再生成并全量校验；它不接收 `--sheet-name`，主表名取自 `meta.sheet_name`。输出已存在时默认拒绝覆盖，用户确认后加 `--force`。
-- 单独校验会检查工作表齐全性、标题与合并区域、表头、冻结与筛选、列范围、公式、必填字段、枚举、ID 与标题唯一性、数量一致性及追溯关联。
-- 缺少 `openpyxl` 时按 `SKILL.md` 第 5 步预检处理。
-- 校验通过前不得交付；失败时修正 IR 后重新渲染，不直接改单元格绕过校验。
+- 命令、覆盖确认、`openpyxl` 异常分级与文件占用处理见 `SKILL.md` 第 5 步及常用命令；`render_cases.py` 不接收 `--sheet-name`，主表名取自 `meta.sheet_name`。
+- `validate_excel_cases.py` 检查工作表齐全性、标题与合并区域、表头、冻结与筛选、列范围、公式、必填字段、枚举、ID 与标题唯一性、数量一致性及追溯关联；失败须修正 IR 重渲染，不直接改单元格绕过校验。

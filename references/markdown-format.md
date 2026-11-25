@@ -57,19 +57,12 @@
 
 ## 校验规则
 
-- 单独校验命令：
-
-  ```bash
-  python "{技能根目录}/scripts/validate_markdown_lists.py" "<文件.md>" [--baseline "<ir.json>"] [--fix]
-  ```
-
-- `--baseline` 会额外比对 Markdown 与基线 IR 的字段差异（忽略无法在 Markdown 表达的 `design_method`）。
+- 命令与交付门禁见 `SKILL.md`；`--baseline` 会额外比对 Markdown 与基线 IR 的字段差异（忽略无法在 Markdown 表达的 `design_method`）。
 - `--fix` 只把多项字段的直接子列表改写为从 1 开始的有序列表，不改写单项列表（单项误用 `1. ` 需手工改回 `- `），不触碰追溯表与嵌套说明；写入使用同目录临时文件替换，失败不覆盖原文件。
-- 校验通过前不得交付；无法执行命令时按“未校验”生成并标注。
 
 ## 人工改稿与维护
 
 - 新增用例可用占位 ID `[TC-NEW]`、`[NEW]` 或省略 ID（写 `> 追溯: ...`），数量声明可暂不改；随后执行 `sync_artifacts.py --assign-ids` 补号并同步数量与 Excel。
 - 只要带 `--excel`，任意缺少 `design_method` 的用例（新增用例或首次由 Markdown 生成 Excel）都会被门禁拦截；需追加 `--default-design-method "<设计方法>"`，或先 `case_baseline.py export` 导出 IR 补全后用 `render_cases.py` 渲染。
-- 删除用例允许 ID 跳号；仅定稿/提测前可用 `sync_artifacts.py --renumber` 重排，进入执行后禁止。
+- ID 跳号与 `--renumber` 规则见[测试规则](test-rules.md#用例-id-稳定策略)。
 - 修改追溯引用后，引用行顺序、追溯表 `关联用例` 列与正文须一致；以 `sync_artifacts.py` 或 `render_cases.py` 回写，不手工维护关联列。
