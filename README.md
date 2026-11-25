@@ -8,7 +8,7 @@
 
 - 已提供需求材料，需要拆分功能点并生成可执行、可验证、可追溯的测试用例。
 - 需要输出 Markdown 或 Excel（`.xlsx`）格式的用例文件。
-- 同一次需求需要同时输出多种格式（共享业务测试设计基线，各格式独立编排与渲染）。
+- 同一次需求需要同时输出多种格式（统一写入单一临时 IR，由脚本确定性渲染）。
 
 不适用于仅做需求评审、测试分析、测试计划或缺陷分析，以及没有需求材料的泛泛测试用例咨询。
 
@@ -86,7 +86,7 @@ python "{本目录}/scripts/case_baseline.py" export --markdown "<文件.md>" --
 python "{本目录}/scripts/case_baseline.py" check --baseline "<ir.json>"
 ```
 
-人工改完 Markdown 后补号、同步 Excel（首次由 Markdown 生成 Excel 时需提供设计方法）：
+人工改完 Markdown 后补号、同步 Excel（存在缺失设计方法的用例时需提供，如新增用例或首次由 Markdown 生成 Excel）：
 
 ```bash
 python "{本目录}/scripts/sync_artifacts.py" --from-markdown "<文件.md>" --excel "<文件.xlsx>" --assign-ids --default-design-method "等价类划分"
