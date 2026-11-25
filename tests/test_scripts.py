@@ -1471,29 +1471,79 @@ class RoundTripAndSyncTests(unittest.TestCase):
     def test_markdown_only_render_without_openpyxl(self):
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
+            blocker = directory_path / "blocker"
+            blocker.mkdir()
+            (blocker / "sitecustomize.py").write_text(
+                "import sys\n"
+                "\n"
+                "class _BlockOpenpyxl:\n"
+                "    def find_spec(self, fullname, path=None, target=None):\n"
+                "        if fullname == 'openpyxl' or fullname.startswith('openpyxl.'):\n"
+                "            raise ImportError('openpyxl blocked for markdown-only test')\n"
+                "        return None\n"
+                "\n"
+                "sys.meta_path.insert(0, _BlockOpenpyxl())\n",
+                encoding="utf-8",
+            )
             baseline = directory_path / "ir.json"
             markdown = directory_path / "cases.md"
+            exported = directory_path / "exported.json"
             baseline.write_text(
                 json.dumps(valid_ir(), ensure_ascii=False), encoding="utf-8"
             )
-            original_import = __import__
+            env = {**subprocess_env(), "PYTHONPATH": str(blocker)}
 
-            def blocked_import(name, *args, **kwargs):
-                if name == "openpyxl" or name.startswith("openpyxl."):
-                    raise ImportError("openpyxl unavailable")
-                return original_import(name, *args, **kwargs)
-
-            with mock.patch("builtins.__import__", side_effect=blocked_import):
-                code = render_cases_main(
-                    [
-                        "--baseline",
-                        str(baseline),
-                        "--markdown",
-                        str(markdown),
-                    ]
+            def run(*args: str) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    [sys.executable, *args],
+                    cwd=directory_path,
+                    env=env,
+                    text=True,
+                    capture_output=True,
                 )
-            self.assertEqual(code, 0)
+
+            blocked = run("-c", "import openpyxl")
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("blocked", blocked.stderr)
+
+            commands = (
+                (
+                    str(ROOT / "scripts" / "render_cases.py"),
+                    "--baseline",
+                    str(baseline),
+                    "--markdown",
+                    str(markdown),
+                ),
+                (str(ROOT / "scripts" / "validate_markdown_lists.py"), str(markdown)),
+                (
+                    str(ROOT / "scripts" / "validate_traceability_bundle.py"),
+                    "--markdown",
+                    str(markdown),
+                ),
+                (
+                    str(ROOT / "scripts" / "case_baseline.py"),
+                    "export",
+                    "--markdown",
+                    str(markdown),
+                    "--output",
+                    str(exported),
+                ),
+                (
+                    str(ROOT / "scripts" / "sync_artifacts.py"),
+                    "--from-markdown",
+                    str(markdown),
+                ),
+            )
+            for command in commands:
+                with self.subTest(script=Path(command[0]).name):
+                    result = run(*command)
+                    self.assertEqual(
+                        result.returncode,
+                        0,
+                        f"{Path(command[0]).name} 失败:\n{result.stdout}\n{result.stderr}",
+                    )
             self.assertEqual(validate(markdown.read_text(encoding="utf-8")), [])
+            self.assertTrue(exported.is_file())
 
     def test_bundle_reports_cross_format_field_diff(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2493,6 +2543,7 @@ class ExcelV2RenderTests(unittest.TestCase):
                 "post_operations": ["@SUM(1)"],
             }
         )
+        ir["meta"]["requirement_name"] = "=1+1"
         ir["meta"]["coverage"] = "=1+1"
         ir["meta"]["notes"] = "+1+1"
         ir["traceability"][1].update(
@@ -2508,7 +2559,7 @@ class ExcelV2RenderTests(unittest.TestCase):
         workbook = build_workbook_from_ir(ir)
         text_cells = {
             "测试用例": ("A3", "C3", "G3", "H3", "I3", "J3", "K3"),
-            "生成说明": ("B5", "B6"),
+            "生成说明": ("B2", "B5", "B6"),
             "需求追溯": ("A3", "B3", "C3", "D3", "E3"),
             "待确认项": ("A3", "B3", "C3", "D3", "E3", "F3"),
         }
@@ -2528,6 +2579,7 @@ class ExcelV2RenderTests(unittest.TestCase):
             loaded = load_workbook(path)
             self.assertEqual(loaded["测试用例"]["C3"].value, "-1+1")
             self.assertEqual(loaded["测试用例"]["H3"].value, "=1+1")
+            self.assertEqual(loaded["生成说明"]["B2"].value, "=1+1")
             self.assertEqual(loaded["生成说明"]["B5"].value, "=1+1")
             self.assertEqual(loaded["待确认项"]["F3"].value, "-1+1")
 
