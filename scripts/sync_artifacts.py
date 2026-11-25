@@ -202,6 +202,18 @@ def main(argv: list[str] | None = None) -> int:
         print("写出文件失败:", file=sys.stderr)
         for error in commit_errors:
             print(f"- {error}", file=sys.stderr)
+        rollback_failed = any("回滚" in error and "失败" in error for error in commit_errors)
+        if rollback_failed:
+            print(
+                "提示：部分文件回滚失败，请先按上方备份路径手工恢复。",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "提示：其余目标文件均未变更（已保持原样或已回滚）；"
+                "请关闭占用程序或修复权限后原样重跑本命令。",
+                file=sys.stderr,
+            )
         return 1
 
     for warning in warnings:

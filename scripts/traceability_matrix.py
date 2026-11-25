@@ -28,43 +28,6 @@ def traceability_text(entry: dict[str, Any]) -> str:
     )
 
 
-def entries_for_case_id(
-    matrix: dict[str, dict[str, Any]],
-    case_id: str,
-) -> list[dict[str, Any]]:
-    return [
-        entry
-        for entry in matrix.values()
-        if case_id in entry["case_ids"]
-    ]
-
-
-def entries_for_case_title(
-    matrix: dict[str, dict[str, Any]],
-    case_title: str,
-) -> list[dict[str, Any]]:
-    return [
-        entry
-        for entry in matrix.values()
-        if case_title in entry["case_titles"]
-    ]
-
-
-def final_matrix_errors(matrix: dict[str, dict[str, Any]]) -> list[str]:
-    pending_coverage = [
-        entry["id"]
-        for entry in matrix.values()
-        if entry["status"] == "待覆盖"
-    ]
-    if not pending_coverage:
-        return []
-    return [
-        "需求追溯矩阵存在待覆盖条目，暂不能核对用例关联: "
-        + "、".join(pending_coverage)
-        + "。请完成各格式关联后再执行最终校验。"
-    ]
-
-
 def load_traceability_matrix(path: str | Path) -> tuple[dict[str, dict[str, Any]], list[str]]:
     matrix_path = Path(path)
     if not matrix_path.is_file():
@@ -241,8 +204,14 @@ def _normalize_case_ids(value: Any) -> tuple[list[str], list[str]]:
 def validate_traceability_entries(
     raw_entries: Any,
     allow_unassigned_ids: bool = False,
+    allow_unsettled_links: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """Validate v2 traceability entries from either an IR array or parsed tables."""
+    """Validate v2 traceability entries from either an IR array or parsed tables.
+
+    ``allow_unsettled_links`` is the draft/settlement mode: links on 待覆盖 and
+    已覆盖 entries are not judged here because ``sync_traceability_from_cases``
+    recomputes them from each case's ``traceability_refs``.
+    """
     if isinstance(raw_entries, dict):
         candidates = list(raw_entries.values())
     elif isinstance(raw_entries, (list, tuple)):
@@ -300,9 +269,15 @@ def validate_traceability_entries(
             continue
 
         case_ids, case_errors = _normalize_case_ids(entry.get("case_ids"))
-        errors.extend(
-            f"{label}（{trace_id}）{message}" for message in case_errors
-        )
+        if allow_unsettled_links and status in ("待覆盖", "已覆盖"):
+            case_errors = [message for message in case_errors if "必须为数组" in message]
+        if case_errors:
+            errors.extend(
+                f"{label}（{trace_id}）{message}" for message in case_errors
+            )
+            if status == "待确认" and case_ids:
+                errors.append(f"{label}（{trace_id}）为待确认条目，不得关联用例。")
+            continue
 
         normalized: dict[str, Any] = {
             "id": trace_id,
@@ -370,12 +345,17 @@ def validate_traceability_entries(
                 )
                 continue
             covered_keys[key] = trace_id
-            if status == "已覆盖" and not case_ids and not allow_unassigned_ids:
+            if (
+                status == "已覆盖"
+                and not case_ids
+                and not allow_unassigned_ids
+                and not allow_unsettled_links
+            ):
                 errors.append(
                     f"{label}（{trace_id}）为已覆盖条目，必须至少关联一个用例。"
                 )
                 continue
-            if status == "待覆盖" and case_ids:
+            if status == "待覆盖" and case_ids and not allow_unsettled_links:
                 errors.append(f"{label}（{trace_id}）为待覆盖条目，不得关联用例。")
                 continue
             normalized["rule"] = rule

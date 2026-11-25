@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import unicodedata
@@ -76,10 +77,15 @@ class FileLockedError(OSError):
 
 
 def is_file_locked_error(exc: OSError) -> bool:
-    """Return True for the errors Windows raises when a file is opened elsewhere."""
-    if isinstance(exc, PermissionError):
-        return True
-    return getattr(exc, "winerror", None) in (5, 32)
+    """Return True for the errors Windows raises when a file is opened elsewhere.
+
+    ``winerror`` 32/33 are sharing violations; ``winerror`` 5 is access denied
+    (read-only attribute or ACL) and is reported as "not writable" instead.
+    """
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in (32, 33)
+    return isinstance(exc, PermissionError)
 
 
 def _file_locked_message(path: Path) -> str:
@@ -87,6 +93,95 @@ def _file_locked_message(path: Path) -> str:
         f"文件被占用，无法写入：{path}。"
         "请先关闭正在打开该文件的程序（如 Excel、WPS 或编辑器）后重试。"
     )
+
+
+def _file_unwritable_message(path: Path) -> str:
+    return f"文件不可写（只读或权限不足）：{path}。请解除只读属性或检查写入权限后重试。"
+
+
+def _file_denied_message(path: Path) -> str:
+    return (
+        f"无法写入：{path}（文件可能被其他程序占用或权限不足）。"
+        "请先关闭占用程序（如 Excel、WPS）并检查写入权限后重试。"
+    )
+
+
+def locked_write_error(exc: OSError, path: Path) -> FileLockedError:
+    """Map a failed write to the matching Chinese lock/denied message."""
+    if getattr(exc, "winerror", None) == 5:
+        return FileLockedError(_file_denied_message(path))
+    return FileLockedError(_file_locked_message(path))
+
+
+def readonly_write_error(exc: OSError, path: Path) -> PermissionError | None:
+    """Return a read-only/permission error when the target itself is unwritable."""
+    if isinstance(exc, PermissionError) and path.exists() and _is_readonly_or_unwritable(path):
+        return PermissionError(_file_unwritable_message(path))
+    return None
+
+
+def _parent_unwritable_message(path: Path) -> str:
+    return f"输出目录不可写（权限不足）：{path}。请检查目录权限后重试。"
+
+
+def _is_readonly_or_unwritable(path: Path) -> bool:
+    """Return True when the existing file cannot be opened for writing."""
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return True
+    if os.name == "nt":
+        return not bool(mode & stat.S_IWRITE)
+    return not os.access(path, os.W_OK)
+
+
+def _is_parent_writable(parent: Path) -> bool:
+    """Return True when ``parent`` exists and accepts new files."""
+    if not parent.is_dir():
+        return False
+    if os.name != "nt":
+        return os.access(parent, os.W_OK)
+    try:
+        fd, probe = tempfile.mkstemp(prefix=".write-probe.", dir=str(parent))
+    except OSError:
+        return False
+    os.close(fd)
+    try:
+        os.unlink(probe)
+    except OSError:
+        pass
+    return True
+
+
+def _check_targets_writable(targets: list[Path]) -> list[str]:
+    """Pre-flight write checks so a locked target never disturbs the others."""
+    errors: list[str] = []
+    for target in targets:
+        if not target.exists():
+            if not _is_parent_writable(target.parent):
+                errors.append(_parent_unwritable_message(target.parent))
+            continue
+        if _is_readonly_or_unwritable(target):
+            errors.append(_file_unwritable_message(target))
+            continue
+        if os.name != "nt":
+            # POSIX has no portable lock probe; os.replace plus rollback covers it.
+            continue
+        try:
+            with target.open("r+b"):
+                pass
+        except OSError as exc:
+            # The file is already known to be writable, so a sharing violation or a
+            # winerror-less PermissionError means another process holds it; winerror 5
+            # is an ACL denial, and anything else (e.g. ENOSPC) keeps its own text.
+            winerror = getattr(exc, "winerror", None)
+            if winerror in (32, 33) or (winerror is None and isinstance(exc, PermissionError)):
+                errors.append(_file_locked_message(target))
+            elif winerror == 5:
+                errors.append(_file_denied_message(target))
+            else:
+                errors.append(f"无法写入：{target}（{exc}）")
+    return errors
 
 
 def replace_file_atomic(temp_path: str | Path, target_path: str | Path) -> None:
@@ -100,8 +195,17 @@ def replace_file_atomic(temp_path: str | Path, target_path: str | Path) -> None:
             temp_path.unlink(missing_ok=True)
         except OSError:
             pass
-        if is_file_locked_error(exc):
-            raise FileLockedError(_file_locked_message(target_path)) from exc
+        if isinstance(exc, PermissionError) and not target_path.exists():
+            if not _is_parent_writable(target_path.parent):
+                raise PermissionError(
+                    f"输出目录不可写（权限不足），无法写入：{target_path}"
+                ) from exc
+            raise
+        readonly_error = readonly_write_error(exc, target_path)
+        if readonly_error is not None:
+            raise readonly_error from exc
+        if is_file_locked_error(exc) or getattr(exc, "winerror", None) == 5:
+            raise locked_write_error(exc, target_path) from exc
         raise
 
 
@@ -174,6 +278,9 @@ def commit_files_atomic(staged: list[tuple[Path, Path]]) -> list[str]:
     backups: dict[Path, Path | None] = {}
     committed: list[Path] = []
     try:
+        preflight_errors = _check_targets_writable([target for target, _temp in staged])
+        if preflight_errors:
+            return preflight_errors
         for target, _temp in staged:
             try:
                 backups[target] = copy_to_temp(target) if target.exists() else None
@@ -183,11 +290,17 @@ def commit_files_atomic(staged: list[tuple[Path, Path]]) -> list[str]:
             try:
                 replace_file_atomic(temp, target)
             except OSError as exc:
-                detail = (
-                    _file_locked_message(target)
-                    if is_file_locked_error(exc)
-                    else str(exc)
-                )
+                if isinstance(exc, FileLockedError):
+                    detail = str(exc)
+                elif (
+                    is_file_locked_error(exc)
+                    and exc.errno is not None
+                    and target.exists()
+                    and not _is_readonly_or_unwritable(target)
+                ):
+                    detail = _file_locked_message(target)
+                else:
+                    detail = str(exc)
                 messages = [f"写入文件失败: {target}（{detail}）"]
                 for done in reversed(committed):
                     backup = backups[done]

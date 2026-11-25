@@ -14,14 +14,16 @@ from case_baseline import (
     canonical_tree_order,
     load_baseline_raw,
     normalize_baseline,
+    prepare_render_ir,
     validate_baseline,
 )
 from validation_utils import (
-    FileLockedError,
     configure_utf8_stdio,
     estimate_row_height as estimate_text_row_height,
     format_excel_multiline,
     is_file_locked_error,
+    locked_write_error,
+    readonly_write_error,
 )
 
 REQUIREMENTS_FILE = Path(__file__).resolve().parents[1] / "requirements.txt"
@@ -120,11 +122,11 @@ def save_workbook_atomic(workbook: Any, path: Path) -> None:
             os.unlink(temp_name)
         except OSError:
             pass
-        if is_file_locked_error(exc):
-            raise FileLockedError(
-                f"文件被占用，无法写入：{path}。"
-                "请先关闭正在打开该文件的程序（如 Excel、WPS 或编辑器）后重试。"
-            ) from exc
+        readonly_error = readonly_write_error(exc, path)
+        if readonly_error is not None:
+            raise readonly_error from exc
+        if is_file_locked_error(exc) or getattr(exc, "winerror", None) == 5:
+            raise locked_write_error(exc, path) from exc
         raise
     except BaseException:
         try:
@@ -348,12 +350,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        workbook = build_workbook_from_ir(
-            load_baseline_raw(args.baseline), sheet_name=args.sheet_name
+        raw = load_baseline_raw(args.baseline)
+        ir, errors, warnings = prepare_render_ir(
+            raw, require_design_method=True
         )
+        if errors:
+            print("\n".join(errors), file=sys.stderr)
+            return 1
+        for warning in warnings:
+            print(f"提示：{warning}", file=sys.stderr)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        workbook = build_workbook_from_ir(ir, sheet_name=args.sheet_name)
         save_workbook_atomic(workbook, output_path)
-    except (ValueError, FileLockedError, RuntimeError) as exc:
+    except (ValueError, OSError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 

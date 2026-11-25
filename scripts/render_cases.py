@@ -9,15 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from case_baseline import (
-    assign_missing_ids,
-    canonical_tree_order,
     load_baseline_raw,
-    normalize_baseline,
-    validate_baseline,
+    prepare_render_ir,
 )
 from create_excel_cases import build_workbook_from_ir, save_workbook_atomic
 from render_markdown_cases import render_markdown
-from traceability_matrix import sync_traceability_from_cases
 from validate_traceability_bundle import summarize, validate_bundle
 from validation_utils import (
     commit_files_atomic,
@@ -31,29 +27,15 @@ def build_render_ir(
     raw: Any,
     assign_ids: bool = False,
     id_prefix: str | None = None,
+    require_design_method: bool = False,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     """Normalize the IR, settle IDs and traceability links before rendering."""
-    errors = validate_baseline(
+    return prepare_render_ir(
         raw,
-        allow_unassigned_ids=assign_ids,
-        require_finalized_traceability=False,
-        check_traceability_links=False,
+        assign_ids=assign_ids,
+        id_prefix=id_prefix,
+        require_design_method=require_design_method,
     )
-    if errors:
-        return {}, errors, []
-
-    ir = normalize_baseline(raw)
-    if assign_ids:
-        assign_missing_ids(ir["cases"], id_prefix)
-    ir["cases"] = canonical_tree_order(ir["cases"])
-
-    entries, sync_errors, warnings = sync_traceability_from_cases(
-        ir["traceability"], ir["cases"]
-    )
-    if sync_errors:
-        return {}, sync_errors, warnings
-    ir["traceability"] = list(entries.values())
-    return ir, [], warnings
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -95,9 +77,12 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    ir, errors, warnings = build_render_ir(raw, args.assign_ids, args.id_prefix)
-    if not errors:
-        errors = validate_baseline(ir, require_design_method=excel_path is not None)
+    ir, errors, warnings = build_render_ir(
+        raw,
+        args.assign_ids,
+        args.id_prefix,
+        require_design_method=excel_path is not None,
+    )
     if errors:
         print("渲染失败，未写出任何文件:", file=sys.stderr)
         for error in errors:
@@ -152,6 +137,19 @@ def main(argv: list[str] | None = None) -> int:
         print("写出文件失败:", file=sys.stderr)
         for error in commit_errors:
             print(f"- {error}", file=sys.stderr)
+        rollback_failed = any("回滚" in error and "失败" in error for error in commit_errors)
+        if rollback_failed:
+            print(
+                f"提示：部分文件回滚失败，请先按上方备份路径手工恢复；"
+                f"临时 IR 仍保留在 {baseline_path}。",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"提示：其余目标文件均未变更（已保持原样或已回滚），"
+                f"临时 IR 已保留在 {baseline_path}；请关闭占用程序或修复权限后原样重跑本命令。",
+                file=sys.stderr,
+            )
         return 1
 
     if args.cleanup_baseline:

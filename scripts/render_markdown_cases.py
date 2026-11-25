@@ -11,8 +11,7 @@ from typing import Any
 from case_baseline import (
     canonical_tree_order,
     load_baseline_raw,
-    normalize_baseline,
-    validate_baseline,
+    prepare_render_ir,
 )
 from validation_utils import (
     configure_utf8_stdio,
@@ -156,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    errors = validate_baseline(raw, require_design_method=False)
+    ir, errors, warnings = prepare_render_ir(raw, require_design_method=False)
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
@@ -169,9 +168,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"输出文件已存在: {output}。确认覆盖后请追加 --force。", file=sys.stderr)
         return 1
 
+    for warning in warnings:
+        print(f"提示：{warning}", file=sys.stderr)
+
     try:
         output.parent.mkdir(parents=True, exist_ok=True)
-        write_text_atomic(output, render_markdown(normalize_baseline(raw)))
+        write_text_atomic(output, render_markdown(ir))
     except (OSError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

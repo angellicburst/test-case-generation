@@ -16,6 +16,7 @@ from traceability_matrix import (
     describe_traceability_mismatch,
     load_traceability_matrix,
     parse_trace_id_list,
+    sync_traceability_from_cases,
     validate_traceability_entries,
 )
 from validation_utils import (
@@ -209,6 +210,7 @@ def validate_baseline(
     require_finalized_traceability: bool = True,
     require_tree_fields: bool = True,
     check_traceability_links: bool = True,
+    allow_unsettled_coverage: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     if not isinstance(payload, dict):
@@ -241,9 +243,20 @@ def validate_baseline(
         errors.append("traceability 不得保留 [待确认] 标记，请使用 status=待确认 条目。")
 
     entries, entry_errors = validate_traceability_entries(
-        ir["traceability"], allow_unassigned_ids=allow_unassigned_ids
+        ir["traceability"],
+        allow_unassigned_ids=allow_unassigned_ids,
+        allow_unsettled_links=allow_unsettled_coverage,
     )
     errors.extend(entry_errors)
+    # IDs that were declared but rejected for other reasons: used only to avoid
+    # cascading "引用不存在的追溯 ID" errors, never to satisfy link checks.
+    declared_statuses: dict[str, str] = {}
+    for raw_entry in ir["traceability"]:
+        if not isinstance(raw_entry, dict):
+            continue
+        raw_id = _text(raw_entry.get("id"))
+        if raw_id and raw_id not in declared_statuses:
+            declared_statuses[raw_id] = _text(raw_entry.get("status"))
     if require_finalized_traceability:
         draft = [entry["id"] for entry in entries.values() if entry["status"] == "待覆盖"]
         if draft:
@@ -358,10 +371,17 @@ def validate_baseline(
             errors.append(f"{label}（{case_id}）的 traceability_refs 存在重复项。")
         for ref in refs:
             entry = entries.get(ref)
-            if entry is None:
+            if entry is not None:
+                if entry["status"] == "待确认":
+                    errors.append(f"{label}（{case_id}）不得引用待确认条目 '{ref}'。")
+            elif ref in declared_statuses:
+                # The entry exists but was rejected (missing rule/source, bad
+                # case_ids, duplicate ID...). Its own error is already reported,
+                # so do not add a misleading "missing trace ID" cascade.
+                if declared_statuses[ref] == "待确认":
+                    errors.append(f"{label}（{case_id}）不得引用待确认条目 '{ref}'。")
+            else:
                 errors.append(f"{label}（{case_id}）引用了不存在的追溯 ID '{ref}'。")
-            elif entry["status"] == "待确认":
-                errors.append(f"{label}（{case_id}）不得引用待确认条目 '{ref}'。")
         if (
             check_traceability_links
             and refs
@@ -579,6 +599,45 @@ def canonical_tree_order(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for bucket in groups.values()
         for case in bucket
     ]
+
+
+def prepare_render_ir(
+    raw: Any,
+    assign_ids: bool = False,
+    id_prefix: str | None = None,
+    require_design_method: bool = False,
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Validate the draft IR, settle IDs and traceability, then validate again.
+
+    This is the single owner of the render pipeline: draft pre-check →
+    normalization/settlement → final full validation.
+    """
+    errors = validate_baseline(
+        raw,
+        allow_unassigned_ids=assign_ids,
+        require_finalized_traceability=False,
+        check_traceability_links=False,
+        allow_unsettled_coverage=True,
+    )
+    if errors:
+        return {}, errors, []
+
+    ir = normalize_baseline(raw)
+    if assign_ids:
+        assign_missing_ids(ir["cases"], id_prefix)
+    ir["cases"] = canonical_tree_order(ir["cases"])
+
+    entries, sync_errors, warnings = sync_traceability_from_cases(
+        ir["traceability"], ir["cases"]
+    )
+    if sync_errors:
+        return {}, sync_errors, warnings
+    ir["traceability"] = list(entries.values())
+
+    errors = validate_baseline(ir, require_design_method=require_design_method)
+    if errors:
+        return {}, errors, warnings
+    return ir, [], warnings
 
 
 def renumber_cases(
@@ -1552,6 +1611,124 @@ def _write_ir(path: Path, ir: dict[str, Any], force: bool) -> None:
     write_text_atomic(path, json.dumps(ir, ensure_ascii=False, indent=2) + "\n")
 
 
+def _format_id_list(case_ids: list[str]) -> str:
+    if len(case_ids) <= 30:
+        return "、".join(case_ids) if case_ids else "（无）"
+    head = "、".join(case_ids[:5])
+    tail = "、".join(case_ids[-5:])
+    return f"{head} … {tail}（共 {len(case_ids)} 条）"
+
+
+def _inspect_summary(ir: dict[str, Any], source: str, ids: list[str]) -> list[str]:
+    meta = ir.get("meta") or {}
+    cases = [case for case in ir.get("cases") or [] if isinstance(case, dict)]
+    entries = [entry for entry in ir.get("traceability") or [] if isinstance(entry, dict)]
+    covered = [entry for entry in entries if entry.get("status") == "已覆盖"]
+    pending = [entry for entry in entries if entry.get("status") == "待确认"]
+
+    lines = [f"=== {source} ==="]
+    lines.append(f"需求名称：{meta.get('requirement_name') or '（空）'}")
+    lines.append(f"上线日期：{meta.get('release_date') or '（空）'}")
+    lines.append(f"覆盖范围：{meta.get('coverage') or '（空）'}")
+    lines.append(f"用例总数：{len(cases)}")
+    lines.append(f"用例 ID：{_format_id_list([case.get('id', '') for case in cases])}")
+
+    modules = Counter(case.get("module", "") for case in cases)
+    types = Counter(case.get("type", "") for case in cases)
+    lines.append(
+        "按模块："
+        + ("、".join(f"{name or '（未标注）'}({count})" for name, count in modules.items()) or "（无）")
+    )
+    lines.append(
+        "按类型："
+        + ("、".join(f"{name or '（未标注）'}({count})" for name, count in types.items()) or "（无）")
+    )
+    lines.append(f"已覆盖追溯：{len(covered)} 条；待确认：{len(pending)} 条")
+    if pending:
+        for entry in pending:
+            lines.append(f"待确认 {entry.get('id', '')}：{entry.get('question', '')}")
+
+    if ids:
+        by_id = {case.get("id", ""): case for case in cases}
+        for wanted in ids:
+            case = by_id.get(wanted)
+            if case is None:
+                lines.append(f"未找到用例: {wanted}")
+                continue
+            lines.append(f"--- {wanted} ---")
+            lines.append(f"标题：{case.get('title', '')}")
+            lines.append(f"类型：{case.get('type', '')}；设计方法：{case.get('design_method') or '（空）'}")
+            lines.append(f"优先级：{case.get('priority', '')}")
+            raw_refs = case.get("traceability_refs")
+            refs = (
+                [str(ref) for ref in raw_refs if ref is not None]
+                if isinstance(raw_refs, (list, tuple))
+                else []
+            )
+            lines.append("追溯引用：" + ("、".join(refs) or "（无）"))
+            for label, key in (
+                ("测试步骤", "steps"),
+                ("预期结果", "expected_results"),
+                ("后置操作", "post_operations"),
+            ):
+                items = case.get(key) or []
+                lines.append(f"{label}：" + ("；".join(items) if items else "（空）"))
+    return lines
+
+
+def inspect_artifacts(
+    markdown_path: str | Path | None = None,
+    excel_path: str | Path | None = None,
+    baseline_path: str | Path | None = None,
+    sheet_name: str = "测试用例",
+    ids: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Build a read-only summary of Markdown / Excel / IR artifacts."""
+    if markdown_path is None and excel_path is None and baseline_path is None:
+        return [], ["必须提供 --markdown、--excel 或 --baseline 至少一个。"]
+
+    lines: list[str] = []
+    errors: list[str] = []
+    wanted = [value for value in (ids or []) if value]
+
+    if baseline_path is not None:
+        try:
+            ir = load_baseline(baseline_path)
+        except ValueError as exc:
+            errors.append(str(exc))
+        else:
+            lines.extend(_inspect_summary(ir, "Baseline IR", wanted))
+            lines.append("")
+
+    if markdown_path is not None:
+        ir, md_errors, _ = parse_markdown_to_ir(markdown_path, strict_count=False)
+        if md_errors:
+            errors.extend(f"Markdown: {message}" for message in md_errors)
+        else:
+            lines.extend(_inspect_summary(ir, "Markdown", wanted))
+            lines.append("")
+
+    if excel_path is not None:
+        ir, excel_errors, _ = parse_excel_to_ir(excel_path, sheet_name=sheet_name)
+        if excel_errors:
+            errors.extend(f"Excel: {message}" for message in excel_errors)
+        else:
+            import openpyxl
+
+            workbook = openpyxl.load_workbook(excel_path, read_only=True)
+            try:
+                sheet_lines = _inspect_summary(ir, "Excel", wanted)
+                sheet_lines.insert(1, "工作表：" + "、".join(workbook.sheetnames))
+            finally:
+                workbook.close()
+            lines.extend(sheet_lines)
+            lines.append("")
+
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines, errors
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="校验、导出与维护 v2 合并 IR。")
@@ -1577,9 +1754,33 @@ def main(argv: list[str] | None = None) -> int:
     renumber.add_argument("--baseline", required=True)
     renumber.add_argument("--id-prefix")
 
+    inspect = subparsers.add_parser("inspect", help="只读打印产物摘要")
+    inspect.add_argument("--markdown")
+    inspect.add_argument("--excel")
+    inspect.add_argument("--baseline")
+    inspect.add_argument("--sheet-name", default="测试用例")
+    inspect.add_argument("--ids", help="逗号分隔的用例 ID，打印明细")
+
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "inspect":
+            ids = [value.strip() for value in (args.ids or "").split(",")]
+            lines, errors = inspect_artifacts(
+                markdown_path=args.markdown,
+                excel_path=args.excel,
+                baseline_path=args.baseline,
+                sheet_name=args.sheet_name,
+                ids=[value for value in ids if value],
+            )
+            for line in lines:
+                print(line)
+            if errors:
+                for error in errors:
+                    print(error, file=sys.stderr)
+                return 1
+            return 0
+
         if args.command == "check":
             errors = validate_baseline(
                 _read_json(args.baseline),
