@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load, validate, and round-trip the merged v2 test case IR."""
+"""Load, validate, and round-trip the merged test case IR."""
 
 from __future__ import annotations
 
@@ -12,9 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from traceability_matrix import (
-    LEGACY_TRACEABILITY_PATTERN,
     describe_traceability_mismatch,
-    load_traceability_matrix,
     parse_trace_id_list,
     sync_traceability_from_cases,
     validate_traceability_entries,
@@ -56,7 +54,7 @@ FIELD_KEY_MAP = {
     "后置操作": "post_operations",
 }
 REQUIRED_FIELDS = ("前置操作", "测试步骤", "预期结果")
-REMOVED_FIELDS = ("备注", "前置条件", "后置清理")
+UNSUPPORTED_FIELDS = ("备注", "前置条件", "后置清理")
 
 V2_HEADERS = (
     "追溯 ID",
@@ -70,19 +68,6 @@ V2_HEADERS = (
     "测试步骤",
     "预期结果",
     "后置操作",
-)
-V1_HEADERS = (
-    "需求/追踪 ID",
-    "用例 ID",
-    "用例标题",
-    "用例类型",
-    "设计方法",
-    "优先级",
-    "前置条件",
-    "测试数据",
-    "执行步骤",
-    "预期结果",
-    "备注",
 )
 COVERED_HEADERS = ("追溯 ID", "来源", "定位", "规则", "关联用例")
 COVERED_HEADERS_ID = ("追溯 ID", "来源", "定位", "规则", "关联用例 ID")
@@ -138,12 +123,6 @@ def normalize_case(raw: Any) -> dict[str, Any]:
         normalized_refs = []
     else:
         normalized_refs = refs
-    pre = case.get("pre_operations")
-    if pre is None:
-        pre = case.get("preconditions")
-    post = case.get("post_operations")
-    if post is None:
-        post = case.get("post_cleanup")
     return {
         "id": _text(case.get("id")),
         "module": _text(case.get("module")),
@@ -153,11 +132,11 @@ def normalize_case(raw: Any) -> dict[str, Any]:
         "title": _text(case.get("title")),
         "design_method": _text(case.get("design_method")),
         "priority": _text(case.get("priority")),
-        "pre_operations": normalize_list_items(pre),
+        "pre_operations": normalize_list_items(case.get("pre_operations")),
         "test_data": normalize_list_items(case.get("test_data")),
         "steps": normalize_list_items(case.get("steps")),
         "expected_results": normalize_list_items(case.get("expected_results")),
-        "post_operations": normalize_list_items(post),
+        "post_operations": normalize_list_items(case.get("post_operations")),
         "traceability_refs": normalized_refs,
     }
 
@@ -277,11 +256,13 @@ def validate_baseline(
                 continue
             for field, hint in (
                 ("requirement_id", "请改用 traceability_refs"),
-                ("notes", "v2 不保留备注"),
+                ("notes", "用例不支持备注字段，请删除"),
+                ("preconditions", "请改用 pre_operations"),
+                ("post_cleanup", "请改用 post_operations"),
             ):
                 if field in raw_case:
                     errors.append(
-                        f"第 {index} 条用例包含 v2 已删除字段 {field}（{hint}）。"
+                        f"第 {index} 条用例包含不支持字段 {field}（{hint}）。"
                     )
             raw_refs = raw_case.get("traceability_refs")
             if isinstance(raw_refs, (list, tuple)) and any(
@@ -719,9 +700,9 @@ def _parse_fields(
                 continue
             if stripped.startswith("- "):
                 name = stripped[2:].strip()
-                if name in REMOVED_FIELDS:
+                if name in UNSUPPORTED_FIELDS:
                     errors.append(
-                        f"第 {line_no} 行：v2 已删除字段“{name}”，"
+                        f"第 {line_no} 行：不支持字段“{name}”，"
                         "请改用 前置操作/测试步骤/预期结果/后置操作。"
                     )
                 else:
@@ -1253,72 +1234,6 @@ def _parse_v2_case_sheet(
     return cases
 
 
-def _parse_v1_case_sheet(
-    ws: Any,
-    legacy_matrix: dict[str, dict[str, Any]],
-    errors: list[str],
-    warnings: list[str],
-) -> list[dict[str, Any]]:
-    reverse: dict[tuple[str, str, str], str] = {}
-    for trace_id, entry in legacy_matrix.items():
-        reverse[(entry["source"], entry["location"], entry["rule"])] = trace_id
-
-    cases: list[dict[str, Any]] = []
-    for row in range(3, ws.max_row + 1):
-        values = [ws.cell(row=row, column=column).value for column in range(1, len(V1_HEADERS) + 1)]
-        if all(value is None or str(value).strip() == "" for value in values):
-            continue
-        title = _cell_text(values[2])
-        notes = "" if values[10] is None else str(values[10])
-        refs: list[str] = []
-        post_operations: list[str] = []
-        leftovers: list[str] = []
-        for line in notes.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            match = LEGACY_TRACEABILITY_PATTERN.match(stripped)
-            if match:
-                key = (match.group(1).strip(), match.group(2).strip(), match.group(3).strip())
-                trace_id = reverse.get(key)
-                if trace_id is None:
-                    errors.append(
-                        f"主工作表第 {row} 行的追溯说明在旧矩阵中不存在：{'｜'.join(key)}"
-                    )
-                elif trace_id not in refs:
-                    refs.append(trace_id)
-                continue
-            if stripped.startswith("后置清理："):
-                post_operations.append(stripped[len("后置清理：") :].strip())
-                continue
-            leftovers.append(stripped)
-        if leftovers:
-            warnings.append(
-                f"主工作表第 {row} 行备注中的非追溯内容已丢弃（v2 不保留备注）：{leftovers[0][:40]}"
-            )
-        cases.append(
-            {
-                "id": _cell_text(values[1]),
-                "module": _module_from_title(title),
-                "type": _cell_text(values[3]),
-                "group": "",
-                "polarity": "",
-                "title": title,
-                "design_method": _cell_text(values[4]),
-                "priority": _cell_text(values[5]),
-                "pre_operations": normalize_list_items(values[6]),
-                "test_data": normalize_list_items(values[7]),
-                "steps": normalize_list_items(values[8]),
-                "expected_results": normalize_list_items(values[9]),
-                "post_operations": post_operations,
-                "traceability_refs": refs,
-            }
-        )
-    if any(not case["polarity"] for case in cases):
-        warnings.append("旧版 Excel 不包含正向/反向信息，请在导出的 IR 中补充 polarity。")
-    return cases
-
-
 def _parse_traceability_sheet(
     ws: Any, status: str, errors: list[str]
 ) -> list[dict[str, Any]]:
@@ -1393,30 +1308,9 @@ def _merge_duplicate_entries(
     return result
 
 
-def _legacy_entries(matrix: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    entries: list[dict[str, Any]] = []
-    for entry in matrix.values():
-        status = entry.get("status", "")
-        normalized: dict[str, Any] = {
-            "id": entry.get("id", ""),
-            "source": entry.get("source", ""),
-            "location": entry.get("location", ""),
-            "status": status,
-        }
-        if status == "待确认":
-            for field in ("issue", "assumption", "question"):
-                normalized[field] = entry.get(field, "")
-        else:
-            normalized["rule"] = entry.get("rule", "")
-            normalized["case_ids"] = list(entry.get("case_ids") or [])
-        entries.append(normalized)
-    return entries
-
-
 def parse_excel_to_ir(
     excel_path: str | Path,
     sheet_name: str = "测试用例",
-    legacy_matrix_path: str | Path | None = None,
     merge_duplicates: bool = False,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     path = Path(excel_path)
@@ -1433,7 +1327,7 @@ def parse_excel_to_ir(
     if sheet_name not in workbook.sheetnames:
         return {}, [f"工作簿缺少主工作表“{sheet_name}”。"], []
     ws = workbook[sheet_name]
-    headers = _sheet_headers(ws, 2, len(V1_HEADERS))
+    headers = _sheet_headers(ws, 2, len(V2_HEADERS))
 
     meta = {
         "title": _cell_text(ws["A1"].value),
@@ -1442,33 +1336,20 @@ def parse_excel_to_ir(
     }
     meta.setdefault("title", "")
 
-    legacy_matrix: dict[str, dict[str, Any]] | None = None
     if headers == V2_HEADERS:
         cases = _parse_v2_case_sheet(ws, errors, warnings)
-    elif headers == V1_HEADERS:
-        if legacy_matrix_path is None:
-            return {}, [
-                "检测到 v1 旧版工作表结构，请通过 --legacy-matrix 提供旧需求追溯矩阵后迁移。"
-            ], []
-        legacy_matrix, matrix_errors = load_traceability_matrix(legacy_matrix_path)
-        if matrix_errors:
-            return {}, matrix_errors, []
-        cases = _parse_v1_case_sheet(ws, legacy_matrix, errors, warnings)
     else:
         return {}, [
             f"无法识别的工作表表头：{' | '.join(headers)}。"
         ], []
 
     entries: list[dict[str, Any]] = []
-    if legacy_matrix is not None:
-        entries = _legacy_entries(legacy_matrix)
+    if "需求追溯" in workbook.sheetnames:
+        entries.extend(_parse_traceability_sheet(workbook["需求追溯"], "已覆盖", errors))
     else:
-        if "需求追溯" in workbook.sheetnames:
-            entries.extend(_parse_traceability_sheet(workbook["需求追溯"], "已覆盖", errors))
-        else:
-            errors.append("工作簿缺少“需求追溯”工作表。")
-        if "待确认项" in workbook.sheetnames:
-            entries.extend(_parse_traceability_sheet(workbook["待确认项"], "待确认", errors))
+        errors.append("工作簿缺少“需求追溯”工作表。")
+    if "待确认项" in workbook.sheetnames:
+        entries.extend(_parse_traceability_sheet(workbook["待确认项"], "待确认", errors))
     if merge_duplicates:
         entries = _merge_duplicate_entries(entries, warnings)
 
@@ -1498,7 +1379,6 @@ def merge_artifacts_to_ir(
     primary: str = "markdown",
     sheet_name: str = "测试用例",
     allow_unassigned_ids: bool = False,
-    legacy_matrix_path: str | Path | None = None,
     strict_count: bool = True,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     errors: list[str] = []
@@ -1523,7 +1403,6 @@ def merge_artifacts_to_ir(
         excel_ir, excel_errors, excel_warnings = parse_excel_to_ir(
             excel_path,
             sheet_name=sheet_name,
-            legacy_matrix_path=legacy_matrix_path,
             merge_duplicates=True,
         )
         errors.extend(excel_errors)
@@ -1566,7 +1445,6 @@ def merge_artifacts_to_ir(
     stale = (
         "Markdown 不包含设计方法，导出 IR 后需从 Excel 合并或手工补充 design_method。",
         "Excel 不包含正向/反向信息，请在导出的 IR 中补充 polarity。",
-        "旧版 Excel 不包含正向/反向信息，请在导出的 IR 中补充 polarity。",
     )
     warnings[:] = [warning for warning in warnings if warning not in stale]
     missing_design = [
@@ -1731,7 +1609,7 @@ def inspect_artifacts(
 
 def main(argv: list[str] | None = None) -> int:
     configure_utf8_stdio()
-    parser = argparse.ArgumentParser(description="校验、导出与维护 v2 合并 IR。")
+    parser = argparse.ArgumentParser(description="校验、导出与维护合并 IR。")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     check = subparsers.add_parser("check", help="校验 IR 文件")
@@ -1741,7 +1619,6 @@ def main(argv: list[str] | None = None) -> int:
     export = subparsers.add_parser("export", help="从现有交付物导出 IR")
     export.add_argument("--markdown")
     export.add_argument("--excel")
-    export.add_argument("--legacy-matrix")
     export.add_argument("--sheet-name", default="测试用例")
     export.add_argument("--output", required=True)
     export.add_argument("--force", action="store_true")
@@ -1803,7 +1680,6 @@ def main(argv: list[str] | None = None) -> int:
                 md_path=args.markdown,
                 excel_path=args.excel,
                 sheet_name=args.sheet_name,
-                legacy_matrix_path=args.legacy_matrix,
             )
             if errors:
                 print("\n".join(errors), file=sys.stderr)

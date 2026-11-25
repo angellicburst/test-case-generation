@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render a merged v2 IR into Markdown and/or Excel and validate the result."""
+"""Render a merged IR into Markdown and/or Excel and validate the result."""
 
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Markdown and/or Excel v2 test-case artifacts and their consistency."""
+"""Validate Markdown and/or Excel test-case artifacts and their consistency."""
 
 from __future__ import annotations
 

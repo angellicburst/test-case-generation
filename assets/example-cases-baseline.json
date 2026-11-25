@@ -4,7 +4,7 @@
     "requirement_name": "示例需求",
     "release_date": "未指定日期",
     "coverage": "示例模块的创建主流程与必填校验",
-    "notes": "本文件为完整终态 v2 合并 IR 样例，可直接通过 `case_baseline.py check` 与 `render_cases.py`；仅 `render_cases.py` 预检支持起草态（`待覆盖` 或省略 `case_ids`）并自动结算，`case_baseline.py check` 仍要求已结算终态。",
+    "notes": "本文件为完整终态合并 IR 样例，可直接通过 `case_baseline.py check` 与 `render_cases.py`；仅 `render_cases.py` 预检支持起草态（`待覆盖` 或省略 `case_ids`）并自动结算，`case_baseline.py check` 仍要求已结算终态。",
     "sheet_name": "测试用例"
   },
   "traceability": [

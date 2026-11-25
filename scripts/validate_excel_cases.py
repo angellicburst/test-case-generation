@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a self-contained Excel (.xlsx) v2 test-case workbook."""
+"""Validate a self-contained Excel (.xlsx) test-case workbook."""
 
 from __future__ import annotations
 

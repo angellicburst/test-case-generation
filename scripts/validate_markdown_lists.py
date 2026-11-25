@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a self-contained Markdown v2 test-case document."""
+"""Validate a self-contained Markdown test-case document."""
 
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the merged v2 IR into the standard Markdown task tree."""
+"""Render the merged IR into the standard Markdown task tree."""
 
 from __future__ import annotations
 

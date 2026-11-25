@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a v2 test case workbook in .xlsx format from the merged IR."""
+"""Generate a test case workbook in .xlsx format from the merged IR."""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def build_info_sheet(workbook: Any, meta: dict[str, Any]) -> None:
         ("覆盖范围", normalize_multiline(meta.get("coverage", ""))),
         (
             "补充说明",
-            normalize_multiline(meta.get("notes") or meta.get("generated_note", "")),
+            normalize_multiline(meta.get("notes", "")),
         ),
     ]
 

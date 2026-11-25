@@ -22,11 +22,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import case_baseline  # noqa: E402
 from case_baseline import (  # noqa: E402
     PENDING_HEADERS,
-    V1_HEADERS,
     _merge_duplicate_entries,
     assign_missing_ids,
     canonical_tree_order,
-    describe_ir_differences,
     inspect_artifacts,
     merge_artifacts_to_ir,
     normalize_baseline,
@@ -47,7 +45,6 @@ import render_markdown_cases  # noqa: E402
 from traceability_matrix import (  # noqa: E402
     describe_traceability_mismatch,
     format_trace_id_list,
-    load_traceability_matrix,
     parse_trace_id_list,
     sync_traceability_from_cases,
     validate_traceability_entries,
@@ -106,25 +103,6 @@ V2_MARKDOWN = """# 测试用例 - 2026-11-24 - [注册]
 | :--- | :--- | :--- | :--- | :--- |
 | TRACE-REG-001 | 注册需求.md | 1.1 手机号 | 手机号必须为11位数字 | TC-ZC-001 |
 """
-
-TRACEABILITY_MATRIX = {
-    "TRACE-REG-001": {
-        "id": "TRACE-REG-001",
-        "source": "注册需求.md",
-        "location": "2.1 手机号规则",
-        "rule": "手机号必须为11位数字",
-        "status": "已覆盖",
-        "case_ids": ["TC-REG-001"],
-        "case_titles": ["提交合法注册"],
-    }
-}
-
-
-def write_matrix(path: Path, matrix: dict[str, dict[str, object]]) -> None:
-    path.write_text(
-        json.dumps({"entries": list(matrix.values())}, ensure_ascii=False),
-        encoding="utf-8",
-    )
 
 
 def subprocess_env():
@@ -323,7 +301,7 @@ class MarkdownV2Tests(unittest.TestCase):
         )
         self._assert_error(swapped, "顺序错误")
         self._assert_error(
-            V2_MARKDOWN.replace("- 测试步骤", "- 备注"), "v2 已删除字段“备注”"
+            V2_MARKDOWN.replace("- 测试步骤", "- 备注"), "不支持字段“备注”"
         )
         self._assert_error(
             V2_MARKDOWN.replace("- 测试步骤", "- 自定义字段"), "未知的直接子字段"
@@ -492,36 +470,6 @@ class MarkdownV2Tests(unittest.TestCase):
 
     def test_cli_missing_file(self):
         self.assertEqual(validate_markdown_main([str(ROOT / "不存在.md")]), 1)
-
-
-class TraceabilityMatrixValidationTests(unittest.TestCase):
-    def test_matrix_accepts_utf8_bom(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "matrix.json"
-            payload = json.dumps(
-                {"entries": list(TRACEABILITY_MATRIX.values())},
-                ensure_ascii=False,
-            )
-            path.write_bytes(b"\xef\xbb\xbf" + payload.encode("utf-8"))
-            matrix, errors = load_traceability_matrix(path)
-            self.assertEqual(errors, [])
-            self.assertIn("TRACE-REG-001", matrix)
-
-    def test_matrix_rejects_multiline_fields(self):
-        for field in ("source", "location", "rule"):
-            with self.subTest(field=field):
-                entry = {
-                    **TRACEABILITY_MATRIX["TRACE-REG-001"],
-                    field: "第一行\n第二行",
-                }
-                with tempfile.TemporaryDirectory() as directory:
-                    path = Path(directory) / "matrix.json"
-                    write_matrix(path, {entry["id"]: entry})
-                    _, errors = load_traceability_matrix(path)
-                    self.assertTrue(
-                        any("不得包含换行" in error for error in errors),
-                        errors,
-                    )
 
 
 class TraceabilityAndBaselineTests(unittest.TestCase):
@@ -858,48 +806,6 @@ class ExcelV2Tests(unittest.TestCase):
                 any("缺少名为" in error for error in validate_excel_file(path, sheet_name="不存在"))
             )
 
-    def test_legacy_v1_workbook_requires_legacy_matrix(self):
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = "测试用例"
-        sheet["A1"] = "测试用例 - 未指定日期 - [注册]"
-        for index, header in enumerate(V1_HEADERS, start=1):
-            sheet.cell(row=2, column=index, value=header)
-        row = [
-            "",
-            "TC-REG-001",
-            "[注册模块]提交合法注册",
-            "功能测试",
-            "等价类划分",
-            "P0",
-            "用户未注册",
-            "<独立测试账号>",
-            "提交注册",
-            "注册成功",
-            "[需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字",
-        ]
-        for index, value in enumerate(row, start=1):
-            sheet.cell(row=3, column=index, value=value)
-        info = workbook.create_sheet("生成说明")
-        for row_index, (label, value) in enumerate(
-            (("需求名称", "注册需求"), ("上线日期", "未指定日期")), start=2
-        ):
-            info.cell(row=row_index, column=1, value=label)
-            info.cell(row=row_index, column=2, value=value)
-
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "legacy.xlsx"
-            matrix_path = Path(directory) / "matrix.json"
-            workbook.save(target)
-            write_matrix(matrix_path, TRACEABILITY_MATRIX)
-            _, errors, _ = parse_excel_to_ir(target)
-            self.assertTrue(any("--legacy-matrix" in error for error in errors), errors)
-            parsed, errors, _ = parse_excel_to_ir(
-                target, legacy_matrix_path=matrix_path
-            )
-        self.assertEqual(errors, [])
-        self.assertEqual(parsed["cases"][0]["traceability_refs"], ["TRACE-REG-001"])
-
 
 class RoundTripAndSyncTests(unittest.TestCase):
     """Render, cross-validate and sync the two formats as one delivery."""
@@ -1214,62 +1120,6 @@ class RoundTripAndSyncTests(unittest.TestCase):
             self.assertFalse(
                 any(entry["status"] == "待确认" for entry in cleared["traceability"])
             )
-
-    def test_export_legacy_v1_workbook_with_matrix(self):
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = "测试用例"
-        sheet["A1"] = "测试用例 - 未指定日期 - [注册]"
-        for index, header in enumerate(V1_HEADERS, start=1):
-            sheet.cell(row=2, column=index, value=header)
-        row = [
-            "",
-            "TC-REG-001",
-            "[注册模块]提交合法注册",
-            "功能测试",
-            "等价类划分",
-            "P0",
-            "用户未注册",
-            "<独立测试账号>",
-            "提交注册",
-            "注册成功",
-            "[需求追溯] 来源：注册需求.md｜定位：2.1 手机号规则｜规则：手机号必须为11位数字",
-        ]
-        for index, value in enumerate(row, start=1):
-            sheet.cell(row=3, column=index, value=value)
-        info = workbook.create_sheet("生成说明")
-        for row_index, (label, value) in enumerate(
-            (("需求名称", "注册需求"), ("上线日期", "未指定日期")), start=2
-        ):
-            info.cell(row=row_index, column=1, value=label)
-            info.cell(row=row_index, column=2, value=value)
-
-        with tempfile.TemporaryDirectory() as directory:
-            directory_path = Path(directory)
-            target = directory_path / "legacy.xlsx"
-            matrix_path = directory_path / "matrix.json"
-            output = directory_path / "exported.json"
-            workbook.save(target)
-            write_matrix(matrix_path, TRACEABILITY_MATRIX)
-            self.assertEqual(
-                case_baseline.main(
-                    [
-                        "export",
-                        "--excel",
-                        str(target),
-                        "--legacy-matrix",
-                        str(matrix_path),
-                        "--output",
-                        str(output),
-                    ]
-                ),
-                0,
-            )
-            data = json.loads(output.read_text(encoding="utf-8"))
-            case = data["cases"][0]
-            self.assertEqual(case["id"], "TC-REG-001")
-            self.assertEqual(case["design_method"], "等价类划分")
-            self.assertEqual(case["traceability_refs"], ["TRACE-REG-001"])
 
     def test_sync_manual_edit_preserves_gap_and_backfills_new_case(self):
         ir = valid_ir()
@@ -1945,7 +1795,7 @@ class CaseBaselineTests(unittest.TestCase):
     def test_markdown_parser_rejects_legacy_fields_and_pollution(self):
         base = render_markdown(normalize_baseline(valid_ir()))
         cases = (
-            (base.replace("- 测试数据", "- 备注"), "v2 已删除字段"),
+            (base.replace("- 测试数据", "- 备注"), "不支持字段"),
             (base.replace("## 需求追溯", "## 其他小节"), "缺少唯一"),
             (base.replace("正向-[注册模块]", "正向-TC-ZC-099-[注册模块]"), "不得包含用例 ID"),
             (base.replace("> [TC-ZC-001] 追溯", "> 追溯"), "缺少用例 ID"),
@@ -2411,8 +2261,8 @@ class ReviewFixTests(unittest.TestCase):
             directory_path = Path(directory)
             baseline = directory_path / "ir.json"
             self._write_ir(baseline, valid_ir())
-            markdown = directory_path / "03-TCD" / "2026-11-24" / "Markdown" / "cases.md"
-            excel = directory_path / "03-TCD" / "2026-11-24" / "Excel" / "cases.xlsx"
+            markdown = directory_path / "TCD" / "2026-11-24" / "Markdown" / "cases.md"
+            excel = directory_path / "TCD" / "2026-11-24" / "Excel" / "cases.xlsx"
             code = render_cases_main(
                 [
                     "--baseline",
@@ -3582,22 +3432,70 @@ class OpenpyxlBlockedInspectTests(unittest.TestCase):
 
 
 class DeadFunctionCleanupTests(unittest.TestCase):
-    """Scenario 8: the removed v1 helpers stay removed and legacy paths still work."""
+    """Old-format support stays removed, and old input is rejected explicitly."""
 
-    def test_removed_helpers_are_gone(self):
+    LEGACY_HEADERS = (
+        "需求/追踪 ID",
+        "用例 ID",
+        "用例标题",
+        "用例类型",
+        "设计方法",
+        "优先级",
+        "前置条件",
+        "测试数据",
+        "执行步骤",
+        "预期结果",
+        "备注",
+    )
+
+    def test_legacy_helpers_are_gone(self):
         import traceability_matrix
 
-        for name in ("entries_for_case_id", "entries_for_case_title", "final_matrix_errors"):
-            with self.subTest(name=name):
+        for name in (
+            "load_traceability_matrix",
+            "traceability_text",
+            "LEGACY_TRACEABILITY_PATTERN",
+            "TRACEABILITY_PATTERN",
+            "REQUIRED_FIELDS",
+            "configure_utf8_stderr",
+            "entries_for_case_id",
+            "entries_for_case_title",
+            "final_matrix_errors",
+        ):
+            with self.subTest(module="traceability_matrix", name=name):
                 self.assertFalse(hasattr(traceability_matrix, name))
+        for name in ("V1_HEADERS", "_parse_v1_case_sheet", "_legacy_entries"):
+            with self.subTest(module="case_baseline", name=name):
+                self.assertFalse(hasattr(case_baseline, name))
 
-    def test_load_traceability_matrix_still_reads_legacy_json(self):
+    def test_legacy_workbook_headers_are_rejected(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "测试用例"
+        sheet["A1"] = "测试用例 - 未指定日期 - [注册]"
+        for index, header in enumerate(self.LEGACY_HEADERS, start=1):
+            sheet.cell(row=2, column=index, value=header)
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "matrix.json"
-            write_matrix(path, TRACEABILITY_MATRIX)
-            matrix, errors = load_traceability_matrix(path)
-        self.assertEqual(errors, [])
-        self.assertEqual(matrix["TRACE-REG-001"]["rule"], "手机号必须为11位数字")
+            target = Path(directory) / "legacy.xlsx"
+            workbook.save(target)
+            _, errors, _ = parse_excel_to_ir(target)
+        self.assertTrue(any("无法识别的工作表表头" in error for error in errors), errors)
+
+    def test_alias_case_fields_are_rejected(self):
+        for field in ("preconditions", "post_cleanup"):
+            with self.subTest(field=field):
+                ir = valid_ir()
+                ir["cases"][0][field] = ["旧值"]
+                errors = validate_baseline(ir)
+                self.assertTrue(
+                    any(field in error and "不支持字段" in error for error in errors),
+                    errors,
+                )
+
+    def test_generated_note_alias_is_ignored(self):
+        workbook = Workbook()
+        create_excel_cases.build_info_sheet(workbook, {"generated_note": "旧备注"})
+        self.assertFalse(workbook["生成说明"]["B6"].value)
 
 
 if __name__ == "__main__":

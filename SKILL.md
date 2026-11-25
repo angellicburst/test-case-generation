@@ -20,13 +20,13 @@ description: >
 
 - 材料整文件不可读，或仅部分可读时，明确指出文件、受影响章节与原因，询问补充或确认忽略；不得静默跳过。
 - 识别需求名称、上线日期、测试范围和输出格式；同时提供需求与设计文档时，按[测试规则](references/test-rules.md#多源材料与真实性)的“多源材料基准”处理。
-- 未指定格式时默认 Markdown。上线日期为 `YYYY-MM-DD` 或 `未指定日期`；不得从文件名、当前日期或非约定目录推断，无日期概念时由用户指定文件名或替代标识；结构化批次目录（如 `01-PRD/{YYYY-MM-DD}/`）日期仅作候选并须确认。缺失日期/目录、覆盖确认与待确认合并提问，细则见[测试规则](references/test-rules.md#元数据交互)。
+- 未指定格式时默认 Markdown。上线日期为 `YYYY-MM-DD` 或 `未指定日期`；不得从文件名、当前日期或目录名推断，无日期概念时由用户指定文件名或替代标识；按 `YYYY-MM-DD` 分批的输入目录日期仅作候选并须确认。缺失日期/目录、覆盖确认与待确认合并提问，细则见[测试规则](references/test-rules.md#元数据交互)。
 - 仅核心规则/范围缺失冲突时暂停澄清；局部细节记入 `待确认`。
-- 新建不读历史用例；同名文件存在须先确认覆盖（自动模式或 Git 跟踪也不得绕过），维护模式才读目标文件与变更。
+- 新建不读已有用例；同名文件存在须先确认覆盖（自动模式或 Git 跟踪也不得绕过），维护模式才读目标文件与变更。
 
 ### 2. 分配需求任务
 
-一个独立需求对应一份用例文档，不合并多个需求。输出路径优先级：用户指定目录或完整文件名 → 项目已有 `03-TCD/{上线日期}/{格式}/` 约定（`{格式}` 取 `Markdown` 或 `Excel`）→ 询问用户。默认文件名 `测试用例-{上线日期}-{需求名称}.{md|xlsx}`；用户指定完整文件名时原样使用。
+一个独立需求对应一份用例文档，不合并多个需求。输出路径优先级：用户指定目录或完整文件名 → 项目已有 `TCD/{上线日期}/{格式}/` 约定（`{格式}` 取 `Markdown` 或 `Excel`）→ 询问用户。默认文件名 `测试用例-{上线日期}-{需求名称}.{md|xlsx}`；用户指定完整文件名时原样使用。
 
 ### 3. 需求分析与测试设计
 
@@ -42,7 +42,7 @@ description: >
 - 按[追溯规范](references/traceability-matrix.md)建条目，将**单一临时 JSON**及维护临时脚本写入系统临时目录（`%TEMP%`/`/tmp`，勿放交付目录或工作区），结构见 `assets/example-cases-baseline.json`。
 - 用例 ID 为 `TC-{需求简写}-{3 位流水号}`；需求简写由 LLM 从需求名称核心词提炼 2~8 位大写字母/数字，同一需求文档统一前缀，不绑定模块名。ID 是永久主键：删除允许跳号，新增取现有最大值 +1；仅定稿前允许 `--renumber` 重排。完整规则见[测试规则](references/test-rules.md#用例-id-稳定策略)。
 - 规模策略：单模块、预计 ≤30 条或维护更新，默认直接串行编写；多模块大规模 >30 条且平台支持并行时，按功能模块并行设计片段，由主代理合并去重后统一渲染。
-- `cases` 每条包含 `id`、`module`、`type`、`group`（可空）、`polarity`（正向/反向）、`title`、`design_method`、`priority`、`pre_operations`、`test_data`、`steps`、`expected_results`、`post_operations`、`traceability_refs`；`design_method` 仅在生成 Excel 时必填，纯 Markdown 可空；`meta.case_count` 不得手填（按 `cases` 自动计算）；已移除 `requirement_id` 与用例级 `notes`。数组每项填纯文本，不写 `- ` 或 `1. ` 前缀；渲染时单项原样输出，多项自动编号。
+- `cases` 每条包含 `id`、`module`、`type`、`group`（可空）、`polarity`（正向/反向）、`title`、`design_method`、`priority`、`pre_operations`、`test_data`、`steps`、`expected_results`、`post_operations`、`traceability_refs`；`design_method` 仅在生成 Excel 时必填，纯 Markdown 可空；`meta.case_count` 不得手填（按 `cases` 自动计算）。数组每项填纯文本，不写 `- ` 或 `1. ` 前缀；渲染时单项原样输出，多项自动编号。
 - 字段取值、枚举与渲染按目标格式的规范和模板确定，见[格式索引](#格式索引)。
 
 ### 5. 一键渲染与校验
