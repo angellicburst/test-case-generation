@@ -11,6 +11,7 @@ from typing import Any
 from case_baseline import (
     assign_missing_ids,
     canonical_tree_order,
+    collect_structure_warnings,
     merge_artifacts_to_ir,
     renumber_cases,
     validate_baseline,
@@ -63,6 +64,7 @@ def prepare_sync_ir(
     if assign_ids:
         assign_missing_ids(ir["cases"], id_prefix)
     ir["cases"] = canonical_tree_order(ir["cases"])
+    warnings.extend(collect_structure_warnings(ir["cases"]))
     if renumber:
         renumber_cases(ir["cases"], ir["traceability"], id_prefix)
 

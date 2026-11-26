@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 import hashlib
 import io
@@ -25,6 +25,7 @@ from case_baseline import (  # noqa: E402
     _merge_duplicate_entries,
     assign_missing_ids,
     canonical_tree_order,
+    collect_structure_warnings,
     inspect_artifacts,
     merge_artifacts_to_ir,
     normalize_baseline,
@@ -2801,6 +2802,166 @@ class DraftSettlementTests(unittest.TestCase):
                     )
 
 
+class DraftCheckCliTests(unittest.TestCase):
+    """`case_baseline.py check --draft` is a read-only draft pre-check."""
+
+    def _write(self, directory: Path, ir: dict) -> Path:
+        baseline = directory / "ir.json"
+        baseline.write_text(json.dumps(ir, ensure_ascii=False), encoding="utf-8")
+        return baseline
+
+    def _draft_ir(self) -> dict:
+        ir = valid_ir()
+        ir["traceability"][0].update({"status": "待覆盖"})
+        ir["traceability"][0].pop("case_ids")
+        return ir
+
+    def test_draft_passes_omitted_case_ids_and_reads_only(self):
+        ir = self._draft_ir()
+        ir["cases"][0]["group"] = ir["cases"][0]["module"]
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._write(Path(directory), ir)
+            digest = hashlib.sha256(baseline.read_bytes()).hexdigest()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = case_baseline.main(
+                    ["check", "--baseline", str(baseline), "--draft"]
+                )
+            self.assertEqual(code, 0)
+            self.assertIn("校验通过（起草态预检）：共 1 条用例，已覆盖追溯 1 条，待确认 0 条。", stdout.getvalue())
+            self.assertNotIn("模拟补号", stdout.getvalue())
+            self.assertIn("提示：模块“注册模块”下存在同名分组“注册模块”", stderr.getvalue())
+            self.assertEqual(hashlib.sha256(baseline.read_bytes()).hexdigest(), digest)
+
+    def test_default_check_still_blocks_draft_ir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._write(Path(directory), self._draft_ir())
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(case_baseline.main(["check", "--baseline", str(baseline)]), 1)
+
+    def test_draft_assign_ids_reports_simulated_ids_without_writing(self):
+        ir = valid_ir_two_cases()
+        ir["cases"][1]["id"] = "TC-NEW"
+        ir["traceability"][0]["status"] = "待覆盖"
+        ir["traceability"][0].pop("case_ids")
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._write(Path(directory), ir)
+            digest = hashlib.sha256(baseline.read_bytes()).hexdigest()
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                code = case_baseline.main(
+                    ["check", "--baseline", str(baseline), "--draft", "--assign-ids"]
+                )
+            self.assertEqual(code, 0)
+            self.assertIn(
+                "模拟补号 1 条：TC-ZC-002（只读预检，未写回 IR）。", stdout.getvalue()
+            )
+            self.assertEqual(hashlib.sha256(baseline.read_bytes()).hexdigest(), digest)
+
+    def test_draft_require_excel_fields_blocks_missing_design_method(self):
+        ir = self._draft_ir()
+        ir["cases"][0]["design_method"] = ""
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._write(Path(directory), ir)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                code = case_baseline.main(
+                    [
+                        "check",
+                        "--baseline",
+                        str(baseline),
+                        "--draft",
+                        "--require-excel-fields",
+                    ]
+                )
+            self.assertEqual(code, 1)
+            self.assertIn("design_method", stderr.getvalue())
+
+    def test_draft_blocks_unreferenced_trace_entry(self):
+        ir = self._draft_ir()
+        ir["traceability"].append(
+            {
+                "id": "TRACE-REG-002",
+                "source": "注册需求.md",
+                "location": "1.3 注册频率",
+                "rule": "同一手机号每日最多注册 3 次",
+                "status": "已覆盖",
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._write(Path(directory), ir)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                code = case_baseline.main(
+                    ["check", "--baseline", str(baseline), "--draft"]
+                )
+            self.assertEqual(code, 1)
+            self.assertIn("TRACE-REG-002", stderr.getvalue())
+            self.assertIn("待覆盖", stderr.getvalue())
+
+    def test_assign_ids_without_draft_is_rejected_by_parser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self._write(Path(directory), valid_ir())
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as context:
+                    case_baseline.main(
+                        ["check", "--baseline", str(baseline), "--assign-ids"]
+                    )
+            self.assertEqual(context.exception.code, 2)
+
+
+class StructureWarningTests(unittest.TestCase):
+    """Scenario 8: module/group structure guards and non-blocking warnings."""
+
+    def test_validate_rejects_case_type_as_module(self):
+        for module in ("回归测试", "功能测试"):
+            with self.subTest(module=module):
+                ir = valid_ir()
+                ir["cases"][0]["module"] = module
+                errors = validate_baseline(ir)
+                self.assertTrue(
+                    any("不能使用测试类型名" in error for error in errors), errors
+                )
+                self.assertEqual(validate_baseline(ir, require_tree_fields=False), [])
+
+    def test_collect_structure_warnings_dedupes_and_tolerates_bad_items(self):
+        cases = [
+            {"module": "模块甲", "group": "模块甲"},
+            {"module": "模块甲", "group": "模块甲"},
+            {"module": "模块甲", "group": "分组一"},
+            {"module": "模块乙", "group": "模块乙"},
+            "not-a-dict",
+            None,
+            {"module": None, "group": None},
+        ]
+        warnings = collect_structure_warnings(cases)
+        self.assertEqual(len(warnings), 2)
+        self.assertIn("模块“模块甲”下存在同名分组“模块甲”", warnings[0])
+        self.assertIn("模块“模块乙”下存在同名分组“模块乙”", warnings[1])
+        self.assertEqual(collect_structure_warnings("not-a-list"), [])
+
+    def test_prepare_render_ir_warns_without_blocking(self):
+        ir = valid_ir()
+        ir["cases"][0]["group"] = "注册模块"
+        settled, errors, warnings = prepare_render_ir(ir)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(settled["cases"]), 1)
+        self.assertTrue(any("同名分组" in warning for warning in warnings), warnings)
+
+    def test_prepare_sync_ir_warns_without_blocking(self):
+        ir = valid_ir()
+        ir["cases"][0]["group"] = "注册模块"
+        settled, errors, _ = prepare_render_ir(ir)
+        self.assertEqual(errors, [])
+        with tempfile.TemporaryDirectory() as directory:
+            markdown = Path(directory) / "cases.md"
+            markdown.write_text(render_markdown(settled), encoding="utf-8")
+            _, sync_errors, warnings = prepare_sync_ir(markdown)
+        self.assertEqual(sync_errors, [])
+        self.assertTrue(any("同名分组" in warning for warning in warnings), warnings)
+
+
 class ZeroLeakGuardTests(unittest.TestCase):
     """Scenario 2: an entry no case references can never render as covered."""
 
@@ -3368,6 +3529,95 @@ class InspectSummaryTests(unittest.TestCase):
         self.assertIn("前置操作：用户未注册。", lines)
         self.assertIn("测试数据：手机号: <测试手机号>", lines)
 
+    def test_markdown_reports_no_coverage_field(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            baseline = directory_path / "ir.json"
+            baseline.write_text(json.dumps(valid_ir(), ensure_ascii=False), encoding="utf-8")
+            markdown = directory_path / "cases.md"
+            self.assertEqual(
+                render_cases_main(
+                    ["--baseline", str(baseline), "--markdown", str(markdown)]
+                ),
+                0,
+            )
+            lines, errors = inspect_artifacts(markdown_path=markdown)
+        self.assertEqual(errors, [])
+        self.assertIn(
+            "覆盖范围：Markdown 不含覆盖范围字段（以 Excel 生成说明为准）", lines
+        )
+        self.assertNotIn("覆盖范围：（空）", lines)
+
+    def test_trace_ids_expand_covered_pending_and_misses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown, excel = self._render(directory_path, pending_ir())
+            baseline = directory_path / "ir.json"
+            before = {
+                path: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (markdown, excel, baseline)
+            }
+            lines, errors = inspect_artifacts(
+                markdown_path=markdown,
+                excel_path=excel,
+                baseline_path=baseline,
+                trace_ids=["TRACE-REG-001", "TRACE-REG-Q01", "TRACE-MISSING"],
+            )
+            after = {
+                path: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (markdown, excel, baseline)
+            }
+        self.assertEqual(errors, [])
+        self.assertEqual(before, after)
+        expected = [
+            "--- TRACE-REG-001 ---",
+            "状态：已覆盖",
+            "来源：注册需求.md",
+            "定位：1.1 手机号",
+            "规则：手机号必须为11位数字",
+            "关联用例：TC-ZC-001",
+            "--- TRACE-REG-Q01 ---",
+            "状态：待确认",
+            "来源：注册需求.md",
+            "定位：1.2 超时",
+            "未明确项：超时行为未定义",
+            "当前测试假设：暂按失败处理",
+            "确认问题：超时是否重试？",
+            "未找到追溯条目: TRACE-MISSING",
+        ]
+        for source in ("Markdown", "Excel", "Baseline IR"):
+            with self.subTest(source=source):
+                start = lines.index(f"=== {source} ===")
+                end = next(
+                    (
+                        index
+                        for index in range(start + 1, len(lines))
+                        if lines[index].startswith("=== ")
+                    ),
+                    len(lines),
+                )
+                block = lines[start:end]
+                position = -1
+                for line in expected:
+                    position = block.index(line, position + 1)
+                pending_start = block.index("--- TRACE-REG-Q01 ---")
+                pending_end = next(
+                    (
+                        index
+                        for index in range(pending_start + 1, len(block))
+                        if block[index].startswith(("--- ", "未找到追溯条目"))
+                    ),
+                    len(block),
+                )
+                pending_block = block[pending_start:pending_end]
+                self.assertFalse(
+                    any(
+                        line.startswith(("规则：", "关联用例："))
+                        for line in pending_block
+                    ),
+                    pending_block,
+                )
+
     def test_excel_inspect_reports_missing_module_column(self):
         ir = valid_ir()
         ir["cases"][0]["title"] = "合法手机号注册成功"
@@ -3441,8 +3691,19 @@ class OpenpyxlBlockedInspectTests(unittest.TestCase):
             for command, expected in (
                 ((script, "inspect", "--markdown", str(markdown)), "=== Markdown ==="),
                 ((script, "inspect", "--baseline", str(baseline)), "=== Baseline IR ==="),
+                (
+                    (
+                        script,
+                        "inspect",
+                        "--markdown",
+                        str(markdown),
+                        "--trace-ids",
+                        "TRACE-REG-001",
+                    ),
+                    "--- TRACE-REG-001 ---",
+                ),
             ):
-                with self.subTest(command=command[2]):
+                with self.subTest(expected=expected):
                     result = run(*command)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn(expected, result.stdout)

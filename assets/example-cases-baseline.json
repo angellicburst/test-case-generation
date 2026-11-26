@@ -4,7 +4,7 @@
     "requirement_name": "示例需求",
     "release_date": "未指定日期",
     "coverage": "示例模块的创建主流程与必填校验",
-    "notes": "本文件为完整终态合并 IR 样例，可直接通过 `case_baseline.py check` 与 `render_cases.py`；仅 `render_cases.py` 预检支持起草态（`待覆盖` 或省略 `case_ids`）并自动结算，`case_baseline.py check` 仍要求已结算终态。",
+    "notes": "本文件为完整终态合并 IR 样例，可直接通过默认 `case_baseline.py check`（要求已结算终态，核验终态与导出一致性）及 `render_cases.py` 渲染；起草临时 IR 可用 `case_baseline.py check --draft` 或 `render_cases.py` 做起草态预检结算（仅证明可渲染，不替代默认 `check`）。样例保留脚本派生的 `case_ids` 仅作结构展示，起草时不要手填。`location` 中日期为当日实际确认日期，区别于 `meta.release_date` 上线日期。",
     "sheet_name": "测试用例"
   },
   "traceability": [
@@ -15,6 +15,14 @@
       "rule": "输入有效参数后创建成功",
       "status": "已覆盖",
       "case_ids": ["TC-SLXQ-001", "TC-SLXQ-002"]
+    },
+    {
+      "id": "TRACE-EXAMPLE-003",
+      "source": "用户补充确认",
+      "location": "2026-11-26 对话（原 PRD 需求文档.md 2.1 示例模块功能）",
+      "rule": "必填字段名称留空时点击保存必须拦截提交并提示名称不能为空，且不生成记录",
+      "status": "已覆盖",
+      "case_ids": ["TC-SLXQ-002"]
     },
     {
       "id": "TRACE-EXAMPLE-002",
@@ -57,7 +65,7 @@
       "steps": ["将名称字段留空", "点击保存"],
       "expected_results": ["提示名称不能为空", "记录未创建"],
       "post_operations": [],
-      "traceability_refs": ["TRACE-EXAMPLE-001"]
+      "traceability_refs": ["TRACE-EXAMPLE-001", "TRACE-EXAMPLE-003"]
     }
   ]
 }

@@ -295,6 +295,12 @@ def validate_baseline(
                 errors.append(f"{label}（{case_id or '无 ID'}）的 module 不能为空。")
             elif _has_newline(case["module"]):
                 errors.append(f"{label}（{case_id}）的 module 不得包含换行。")
+            elif case["module"] in ALLOWED_CASE_TYPES:
+                errors.append(
+                    f"{label}（{case_id or '无 ID'}）的 module 不能使用测试类型名"
+                    f"“{case['module']}”，请填写具体业务功能模块名"
+                    f"（若业务本身涉及该类型管理，请写全称如“{case['module']}管理”）。"
+                )
         if case["type"] not in ALLOWED_CASE_TYPES:
             errors.append(
                 f"{label}（{case_id}）的 type 必须为 {'、'.join(ALLOWED_CASE_TYPES)} 之一。"
@@ -582,6 +588,30 @@ def canonical_tree_order(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def collect_structure_warnings(cases: Any) -> list[str]:
+    """Return non-blocking warnings for redundant tree levels (module == group)."""
+    warnings: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    if not isinstance(cases, (list, tuple)):
+        return warnings
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        module = _text(case.get("module"))
+        group = _text(case.get("group"))
+        if not group or group != module:
+            continue
+        key = (module, group)
+        if key in seen:
+            continue
+        seen.add(key)
+        warnings.append(
+            f"模块“{module}”下存在同名分组“{group}”，"
+            "无子分组时建议留空 group 避免冗余层级。"
+        )
+    return warnings
+
+
 def prepare_render_ir(
     raw: Any,
     assign_ids: bool = False,
@@ -607,10 +637,12 @@ def prepare_render_ir(
     if assign_ids:
         assign_missing_ids(ir["cases"], id_prefix)
     ir["cases"] = canonical_tree_order(ir["cases"])
+    structure_warnings = collect_structure_warnings(ir["cases"])
 
     entries, sync_errors, warnings = sync_traceability_from_cases(
         ir["traceability"], ir["cases"]
     )
+    warnings = structure_warnings + warnings
     if sync_errors:
         return {}, sync_errors, warnings
     ir["traceability"] = list(entries.values())
@@ -1497,7 +1529,12 @@ def _format_id_list(case_ids: list[str]) -> str:
     return f"{head} … {tail}（共 {len(case_ids)} 条）"
 
 
-def _inspect_summary(ir: dict[str, Any], source: str, ids: list[str]) -> list[str]:
+def _inspect_summary(
+    ir: dict[str, Any],
+    source: str,
+    ids: list[str],
+    trace_ids: list[str] | None = None,
+) -> list[str]:
     meta = ir.get("meta") or {}
     cases = [case for case in ir.get("cases") or [] if isinstance(case, dict)]
     entries = [entry for entry in ir.get("traceability") or [] if isinstance(entry, dict)]
@@ -1507,7 +1544,10 @@ def _inspect_summary(ir: dict[str, Any], source: str, ids: list[str]) -> list[st
     lines = [f"=== {source} ==="]
     lines.append(f"需求名称：{meta.get('requirement_name') or '（空）'}")
     lines.append(f"上线日期：{meta.get('release_date') or '（空）'}")
-    lines.append(f"覆盖范围：{meta.get('coverage') or '（空）'}")
+    if source == "Markdown" and not meta.get("coverage"):
+        lines.append("覆盖范围：Markdown 不含覆盖范围字段（以 Excel 生成说明为准）")
+    else:
+        lines.append(f"覆盖范围：{meta.get('coverage') or '（空）'}")
     lines.append(f"用例总数：{len(cases)}")
     lines.append(f"用例 ID：{_format_id_list([case.get('id', '') for case in cases])}")
 
@@ -1559,6 +1599,31 @@ def _inspect_summary(ir: dict[str, Any], source: str, ids: list[str]) -> list[st
             ):
                 items = case.get(key) or []
                 lines.append(f"{label}：" + ("；".join(items) if items else "（空）"))
+
+    if trace_ids:
+        entries_by_id = {_text(entry.get("id")): entry for entry in entries}
+        for wanted in trace_ids:
+            entry = entries_by_id.get(wanted)
+            if entry is None:
+                lines.append(f"未找到追溯条目: {wanted}")
+                continue
+            lines.append(f"--- {wanted} ---")
+            lines.append(f"状态：{entry.get('status', '')}")
+            lines.append(f"来源：{entry.get('source', '')}")
+            lines.append(f"定位：{entry.get('location', '')}")
+            if entry.get("status") == "待确认":
+                lines.append(f"未明确项：{entry.get('issue', '')}")
+                lines.append(f"当前测试假设：{entry.get('assumption', '')}")
+                lines.append(f"确认问题：{entry.get('question', '')}")
+            else:
+                lines.append(f"规则：{entry.get('rule', '')}")
+                raw_case_ids = entry.get("case_ids")
+                case_ids = (
+                    [_text(item) for item in raw_case_ids if _text(item)]
+                    if isinstance(raw_case_ids, (list, tuple))
+                    else []
+                )
+                lines.append("关联用例：" + ("、".join(case_ids) if case_ids else "（无）"))
     return lines
 
 
@@ -1568,6 +1633,7 @@ def inspect_artifacts(
     baseline_path: str | Path | None = None,
     sheet_name: str = "测试用例",
     ids: list[str] | None = None,
+    trace_ids: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Build a read-only summary of Markdown / Excel / IR artifacts."""
     if markdown_path is None and excel_path is None and baseline_path is None:
@@ -1576,6 +1642,7 @@ def inspect_artifacts(
     lines: list[str] = []
     errors: list[str] = []
     wanted = [value for value in (ids or []) if value]
+    wanted_traces = [value for value in (trace_ids or []) if value]
 
     if baseline_path is not None:
         try:
@@ -1583,7 +1650,7 @@ def inspect_artifacts(
         except ValueError as exc:
             errors.append(str(exc))
         else:
-            lines.extend(_inspect_summary(ir, "Baseline IR", wanted))
+            lines.extend(_inspect_summary(ir, "Baseline IR", wanted, wanted_traces))
             lines.append("")
 
     if markdown_path is not None:
@@ -1591,7 +1658,7 @@ def inspect_artifacts(
         if md_errors:
             errors.extend(f"Markdown: {message}" for message in md_errors)
         else:
-            lines.extend(_inspect_summary(ir, "Markdown", wanted))
+            lines.extend(_inspect_summary(ir, "Markdown", wanted, wanted_traces))
             lines.append("")
 
     if excel_path is not None:
@@ -1603,7 +1670,7 @@ def inspect_artifacts(
 
             workbook = openpyxl.load_workbook(excel_path, read_only=True)
             try:
-                sheet_lines = _inspect_summary(ir, "Excel", wanted)
+                sheet_lines = _inspect_summary(ir, "Excel", wanted, wanted_traces)
                 sheet_lines.insert(1, "工作表：" + "、".join(workbook.sheetnames))
             finally:
                 workbook.close()
@@ -1623,6 +1690,16 @@ def main(argv: list[str] | None = None) -> int:
     check = subparsers.add_parser("check", help="校验 IR 文件")
     check.add_argument("--baseline", required=True)
     check.add_argument("--require-excel-fields", action="store_true")
+    check.add_argument(
+        "--draft",
+        action="store_true",
+        help="起草态只读预检结算（仅证明可渲染，不替代默认终态校验）",
+    )
+    check.add_argument(
+        "--assign-ids",
+        action="store_true",
+        help="与 --draft 连用，按起草态结算并仅打印模拟补号结果",
+    )
 
     export = subparsers.add_parser("export", help="从现有交付物导出 IR")
     export.add_argument("--markdown")
@@ -1645,18 +1722,23 @@ def main(argv: list[str] | None = None) -> int:
     inspect.add_argument("--baseline")
     inspect.add_argument("--sheet-name", default="测试用例")
     inspect.add_argument("--ids", help="逗号分隔的用例 ID，打印明细")
+    inspect.add_argument("--trace-ids", help="逗号分隔的追溯 ID，打印条目明细")
 
     args = parser.parse_args(argv)
+    if args.command == "check" and args.assign_ids and not args.draft:
+        parser.error("--assign-ids 仅可与 --draft 一起使用。")
 
     try:
         if args.command == "inspect":
             ids = [value.strip() for value in (args.ids or "").split(",")]
+            trace_ids = [value.strip() for value in (args.trace_ids or "").split(",")]
             lines, errors = inspect_artifacts(
                 markdown_path=args.markdown,
                 excel_path=args.excel,
                 baseline_path=args.baseline,
                 sheet_name=args.sheet_name,
                 ids=[value for value in ids if value],
+                trace_ids=[value for value in trace_ids if value],
             )
             for line in lines:
                 print(line)
@@ -1667,8 +1749,50 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "check":
+            raw = _read_json(args.baseline)
+            if args.draft:
+                original_ids: set[str] = set()
+                if isinstance(raw, dict) and isinstance(raw.get("cases"), (list, tuple)):
+                    for raw_case in raw["cases"]:
+                        if not isinstance(raw_case, dict):
+                            continue
+                        case_id = _text(raw_case.get("id"))
+                        if case_id and case_id not in PLACEHOLDER_IDS:
+                            original_ids.add(case_id)
+                ir, errors, warnings = prepare_render_ir(
+                    raw,
+                    assign_ids=args.assign_ids,
+                    require_design_method=args.require_excel_fields,
+                )
+                if errors:
+                    print("\n".join(errors), file=sys.stderr)
+                    return 1
+                for warning in warnings:
+                    print(f"提示：{warning}", file=sys.stderr)
+                covered = sum(
+                    1 for entry in ir["traceability"] if entry.get("status") == "已覆盖"
+                )
+                pending = sum(
+                    1 for entry in ir["traceability"] if entry.get("status") == "待确认"
+                )
+                print(
+                    f"校验通过（起草态预检）：共 {len(ir['cases'])} 条用例，"
+                    f"已覆盖追溯 {covered} 条，待确认 {pending} 条。"
+                )
+                if args.assign_ids:
+                    simulated = [
+                        case["id"]
+                        for case in ir["cases"]
+                        if case["id"] not in original_ids
+                    ]
+                    if simulated:
+                        print(
+                            f"模拟补号 {len(simulated)} 条：{', '.join(simulated)}"
+                            "（只读预检，未写回 IR）。"
+                        )
+                return 0
             errors = validate_baseline(
-                _read_json(args.baseline),
+                raw,
                 require_design_method=args.require_excel_fields,
             )
             if errors:

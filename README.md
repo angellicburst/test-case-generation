@@ -85,17 +85,21 @@ python "{本目录}/scripts/render_cases.py" --baseline "<ir.json>" --markdown "
 
 ```bash
 python "{本目录}/scripts/case_baseline.py" export --markdown "<文件.md>" --excel "<文件.xlsx>" --output "<ir.json>" --force
-python "{本目录}/scripts/case_baseline.py" check --baseline "<ir.json>"
+python "{本目录}/scripts/case_baseline.py" check --baseline "<ir.json>" [--require-excel-fields]
+python "{本目录}/scripts/case_baseline.py" check --baseline "<ir.json>" --draft [--assign-ids] [--require-excel-fields]
 ```
 
-抽查现有产物的用例分布与单条详情（只读，不改文件）：
+默认 `check` 要求已结算终态（含脚本派生的 `case_ids` 与无残留 `待覆盖`），用于核验终态与导出一致性。起草态 IR 可用 `check --draft` 只读预检结算（可省略 `case_ids`、`待覆盖` 自动转正）；`--assign-ids` 仅可与 `--draft` 连用，只打印模拟补号结果，不写回 IR。`--draft` 仅证明 IR 可渲染，不替代默认 `check` 的终态校验。
+
+抽查现有产物的用例分布、单条用例与追溯条目详情（只读，不改文件）：
 
 ```bash
 python "{本目录}/scripts/case_baseline.py" inspect --markdown "<文件.md>"
 python "{本目录}/scripts/case_baseline.py" inspect --excel "<文件.xlsx>" --ids TC-XXX-001,TC-XXX-002
+python "{本目录}/scripts/case_baseline.py" inspect --markdown "<文件.md>" --trace-ids TRACE-XXX-001,TRACE-XXX-002
 ```
 
-`--ids` 明细含前置操作、测试数据、测试步骤、预期结果与后置操作。Excel 不含模块列，`--excel` 摘要的按模块行显示“Excel 不含模块列（未统计）”，模块分布以 Markdown 为准。
+`--ids` 明细含前置操作、测试数据、测试步骤、预期结果与后置操作；`--trace-ids` 明细含状态、来源、定位，已覆盖条目附规则与关联用例，待确认条目附未明确项、当前测试假设与确认问题。Excel 不含模块列，`--excel` 摘要的按模块行显示“Excel 不含模块列（未统计）”，模块分布以 Markdown 为准；Markdown 不含覆盖范围字段，`--markdown` 的覆盖范围行显示“Markdown 不含覆盖范围字段（以 Excel 生成说明为准）”。
 
 人工改完 Markdown 后补号、同步 Excel（存在缺失设计方法的用例时需提供，如新增用例或首次由 Markdown 生成 Excel）：
 
