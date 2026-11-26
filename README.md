@@ -25,7 +25,7 @@
 
 用户未指定格式时默认 Markdown。输出路径优先级：用户指定目录或完整文件名 → 项目已有 `TCD/{上线日期}/{格式}/` 约定 → 询问用户。`{格式}` 取 `Markdown` 或 `Excel`。`{上线日期}` 为 `YYYY-MM-DD`；用户确认不使用具体日期时写 `未指定日期`。
 
-**交付目录只保留最终的 `.md` / `.xlsx`**：追溯与待确认数据已内嵌在两种格式中，不再生成矩阵 JSON 或临时 IR；临时 IR 在渲染成功后由 `--cleanup-baseline` 删除。
+**交付目录只保留最终的 `.md` / `.xlsx`**：追溯与待确认数据已内嵌在两种格式中，不再生成矩阵 JSON 或临时 IR；无待确认且无后续修改时，临时 IR 由 `--cleanup-baseline` 在渲染成功后删除；有待确认项时保留 IR 至确认完成。
 
 ## 目录结构
 
@@ -68,6 +68,8 @@ test-case-generation/
 
 执行者按 [SKILL.md](SKILL.md) 执行：确认输入与元数据 → 分配需求 → 分析与设计 → 编写临时合并 IR → 一键渲染与校验 → 汇报与维护。
 
+委派执行时，委派方应把已确认的上线日期、输出目录和格式传入技能参数；执行方直接采用并在最终汇报中回传这些值，避免重复询问和状态不一致。
+
 ### 直接使用脚本
 
 以下命令中的 `{本目录}` 指本 README 所在目录，不要按当前项目工作目录拼接；均为单行命令。
@@ -93,6 +95,8 @@ python "{本目录}/scripts/case_baseline.py" inspect --markdown "<文件.md>"
 python "{本目录}/scripts/case_baseline.py" inspect --excel "<文件.xlsx>" --ids TC-XXX-001,TC-XXX-002
 ```
 
+`--ids` 明细含前置操作、测试数据、测试步骤、预期结果与后置操作。Excel 不含模块列，`--excel` 摘要的按模块行显示“Excel 不含模块列（未统计）”，模块分布以 Markdown 为准。
+
 人工改完 Markdown 后补号、同步 Excel（存在缺失设计方法的用例时需提供，如新增用例或首次由 Markdown 生成 Excel）：
 
 ```bash
@@ -108,7 +112,7 @@ python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" [--sheet-na
 python "{本目录}/scripts/validate_traceability_bundle.py" --markdown "<文件.md>" --excel "<文件.xlsx>" [--baseline "<ir.json>"] [--coverage-only]
 ```
 
-`render_cases.py` 与 `sync_artifacts.py` 都会先渲染到临时文件、全量校验，再备份并原子替换；任一写入失败会回滚并提示文件占用。`render_cases.py` 检测到输出已存在时默认拒绝覆盖，用户确认后追加 `--force`；`sync_artifacts.py` 属维护模式，用户提出更新即授权覆盖指定文件。
+`render_cases.py` 与 `sync_artifacts.py` 都会先渲染到临时文件、全量校验，再备份并原子替换；任一写入失败会回滚并提示文件占用。`render_cases.py` 检测到输出已存在时默认拒绝覆盖，任务开始前已存在的文件须用户确认后追加 `--force`；同一轮内覆盖本次刚生成的文件无需重复确认。`sync_artifacts.py` 属维护模式，用户提出更新即授权覆盖指定文件。
 
 **Excel 被占用时**：脚本会提示“文件被占用”并回滚，临时 IR 保留在原处。关闭 Excel/WPS 后原样重跑同一条命令即可，不要改成只写 Markdown 或另存候选文件——那会让两种格式不同步。只读文件与目录权限不足会分别提示“文件不可写”与“输出目录不可写”。
 

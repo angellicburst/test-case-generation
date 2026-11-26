@@ -1513,10 +1513,16 @@ def _inspect_summary(ir: dict[str, Any], source: str, ids: list[str]) -> list[st
 
     modules = Counter(case.get("module", "") for case in cases)
     types = Counter(case.get("type", "") for case in cases)
-    lines.append(
-        "按模块："
-        + ("、".join(f"{name or '（未标注）'}({count})" for name, count in modules.items()) or "（无）")
-    )
+    if source == "Excel" and modules and not any(modules):
+        lines.append("按模块：Excel 不含模块列（未统计）")
+    else:
+        lines.append(
+            "按模块："
+            + (
+                "、".join(f"{name or '（未标注）'}({count})" for name, count in modules.items())
+                or "（无）"
+            )
+        )
     lines.append(
         "按类型："
         + ("、".join(f"{name or '（未标注）'}({count})" for name, count in types.items()) or "（无）")
@@ -1545,6 +1551,8 @@ def _inspect_summary(ir: dict[str, Any], source: str, ids: list[str]) -> list[st
             )
             lines.append("追溯引用：" + ("、".join(refs) or "（无）"))
             for label, key in (
+                ("前置操作", "pre_operations"),
+                ("测试数据", "test_data"),
                 ("测试步骤", "steps"),
                 ("预期结果", "expected_results"),
                 ("后置操作", "post_operations"),

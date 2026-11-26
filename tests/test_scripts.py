@@ -3355,6 +3355,29 @@ class InspectSummaryTests(unittest.TestCase):
         self.assertIn("--- TC-ZC-001 ---", lines)
         self.assertIn("未找到用例: TC-MISSING", lines)
 
+    def test_ids_detail_includes_pre_operations_and_test_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            markdown, _ = self._render(Path(directory), valid_ir())
+            lines, errors = inspect_artifacts(markdown_path=markdown, ids=["TC-ZC-001"])
+        self.assertEqual(errors, [])
+        positions = [
+            next(index for index, line in enumerate(lines) if line.startswith(label + "："))
+            for label in ("前置操作", "测试数据", "测试步骤", "预期结果", "后置操作")
+        ]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("前置操作：用户未注册。", lines)
+        self.assertIn("测试数据：手机号: <测试手机号>", lines)
+
+    def test_excel_inspect_reports_missing_module_column(self):
+        ir = valid_ir()
+        ir["cases"][0]["title"] = "合法手机号注册成功"
+        with tempfile.TemporaryDirectory() as directory:
+            _, excel = self._render(Path(directory), ir)
+            lines, errors = inspect_artifacts(excel_path=excel)
+        self.assertEqual(errors, [])
+        self.assertIn("按模块：Excel 不含模块列（未统计）", lines)
+        self.assertFalse(any("（未标注）" in line for line in lines))
+
     def test_malformed_refs_do_not_crash(self):
         for refs in ("TRACE-REG-001", 123, None):
             with self.subTest(refs=refs):
