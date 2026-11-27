@@ -25,7 +25,7 @@
 
 用户未指定格式时默认 Markdown。输出路径优先级：用户指定目录或完整文件名 → 项目已有 `TCD/{上线日期}/{格式}/` 约定 → 询问用户。`{格式}` 取 `Markdown` 或 `Excel`。`{上线日期}` 为 `YYYY-MM-DD`；用户确认不使用具体日期时写 `未指定日期`。
 
-**交付目录只保留最终的 `.md` / `.xlsx`**：追溯与待确认数据已内嵌在两种格式中，不再生成矩阵 JSON 或临时 IR；无待确认且无后续修改时，临时 IR 由 `--cleanup-baseline` 在渲染成功后删除；有待确认项时保留 IR 至确认完成。
+**交付目录只保留最终的 `.md` / `.xlsx`**：追溯与待确认数据已内嵌在两种格式中，不再生成矩阵 JSON 或临时 IR；无待确认且无后续修改时，用 `case_baseline.py cleanup --baseline "<ir.json>"` 在 `inspect` 抽查闭环后清理；有待确认项时保留 IR 至确认完成。
 
 ## 目录结构
 
@@ -77,9 +77,18 @@ test-case-generation/
 从临时 IR 生成两种格式（推荐入口）：
 
 ```bash
-python "{本目录}/scripts/render_cases.py" --baseline "<ir.json>" --markdown "<输出.md>" --excel "<输出.xlsx>" --cleanup-baseline
+python "{本目录}/scripts/render_cases.py" --baseline "<ir.json>" --markdown "<输出.md>" --excel "<输出.xlsx>"
 python "{本目录}/scripts/render_cases.py" --baseline "<ir.json>" --markdown "<输出.md>" --force
 ```
+
+渲染成功后先用 `inspect` 抽查，确认无待确认项、无后续确认且抽查无误后，再清理临时 IR：
+
+```bash
+python "{本目录}/scripts/case_baseline.py" inspect --markdown "<输出.md>" --excel "<输出.xlsx>" --merged
+python "{本目录}/scripts/case_baseline.py" cleanup --baseline "<ir.json>"
+```
+
+`render_cases.py --cleanup-baseline` 保留兼容，但它在渲染后立即删除 IR，会让随后的 `inspect` 发现问题时无法直接改 IR 重渲染；日常出稿推荐用上面的 `cleanup` 子命令。
 
 从现有产物导出 IR 以便维护：
 
@@ -97,9 +106,14 @@ python "{本目录}/scripts/case_baseline.py" check --baseline "<ir.json>" --dra
 python "{本目录}/scripts/case_baseline.py" inspect --markdown "<文件.md>"
 python "{本目录}/scripts/case_baseline.py" inspect --excel "<文件.xlsx>" --ids TC-XXX-001,TC-XXX-002
 python "{本目录}/scripts/case_baseline.py" inspect --markdown "<文件.md>" --trace-ids TRACE-XXX-001,TRACE-XXX-002
+python "{本目录}/scripts/case_baseline.py" inspect --markdown "<文件.md>" --excel "<文件.xlsx>" --merged --ids TC-XXX-001 --trace-ids TRACE-XXX-001
 ```
 
-`--ids` 明细含前置操作、测试数据、测试步骤、预期结果与后置操作；`--trace-ids` 明细含状态、来源、定位，已覆盖条目附规则与关联用例，待确认条目附未明确项、当前测试假设与确认问题。Excel 不含模块列，`--excel` 摘要的按模块行显示“Excel 不含模块列（未统计）”，模块分布以 Markdown 为准；Markdown 不含覆盖范围字段，`--markdown` 的覆盖范围行显示“Markdown 不含覆盖范围字段（以 Excel 生成说明为准）”。
+`--ids` 明细含前置操作、测试数据、测试步骤、预期结果与后置操作；`--trace-ids` 明细含状态、来源、定位，已覆盖条目附规则与关联用例，待确认条目附未明确项、当前测试假设与确认问题。摘要含 `补充说明`（Excel `生成说明` 的补充说明，用于核验删减留痕），待确认条目以单行四元组展示 `来源｜定位 / 未明确 / 假设 / 问题`。
+
+Markdown 不含覆盖范围、补充说明与设计方法字段：`--markdown` 单源摘要的这两行显示“以 Excel 生成说明为准”，用例明细的设计方法显示“Markdown 不含设计方法（以 Excel 为准）”。Excel 不含模块列，`--excel` 摘要的按模块行显示“Excel 不含模块列（未统计）”。
+
+`--merged` 把多源合并成一份摘要（`Markdown > Excel > Baseline IR` 顺延取首个有效值，Markdown 不承载的覆盖范围/补充说明自动落到 Excel 或 IR），`--ids`/`--trace-ids` 明细也只输出一份；各源的需求名称、上线日期、用例总数、用例 ID、已覆盖数或待确认数不一致时输出 `警告：跨源摘要不一致（...）`。双格式交付推荐用它一次看全，避免只跑单源漏检 Excel。
 
 人工改完 Markdown 后补号、同步 Excel（存在缺失设计方法的用例时需提供，如新增用例或首次由 Markdown 生成 Excel）：
 
@@ -116,7 +130,7 @@ python "{本目录}/scripts/validate_excel_cases.py" "<文件.xlsx>" [--sheet-na
 python "{本目录}/scripts/validate_traceability_bundle.py" --markdown "<文件.md>" --excel "<文件.xlsx>" [--baseline "<ir.json>"] [--coverage-only]
 ```
 
-`render_cases.py` 与 `sync_artifacts.py` 都会先渲染到临时文件、全量校验，再备份并原子替换；任一写入失败会回滚并提示文件占用。`render_cases.py` 检测到输出已存在时默认拒绝覆盖，任务开始前已存在的文件须用户确认后追加 `--force`；同一轮内覆盖本次刚生成的文件无需重复确认。`sync_artifacts.py` 属维护模式，用户提出更新即授权覆盖指定文件。
+`render_cases.py` 与 `sync_artifacts.py` 都会先渲染到临时文件、全量校验，再备份并原子替换；任一写入失败会回滚并提示文件占用。渲染成功后会以 `提示：` 前缀向 `stderr` 输出非阻断结构警告（如 `post_operations`/`test_data` 仅填 `无`/`暂无`/`N/A` 占位词、模块与分组同名），这些不阻断出稿，按提示留空数组 `[]` 或删除冗余分组即可。`render_cases.py` 检测到输出已存在时默认拒绝覆盖，任务开始前已存在的文件须用户确认后追加 `--force`；同一轮内覆盖本次刚生成的文件无需重复确认。`sync_artifacts.py` 属维护模式，用户提出更新即授权覆盖指定文件。
 
 **Excel 被占用时**：脚本会提示“文件被占用”并回滚，临时 IR 保留在原处。关闭 Excel/WPS 后原样重跑同一条命令即可，不要改成只写 Markdown 或另存候选文件——那会让两种格式不同步。只读文件与目录权限不足会分别提示“文件不可写”与“输出目录不可写”。
 
@@ -155,7 +169,7 @@ python "{本目录}/scripts/validate_traceability_bundle.py" --markdown "<文件
 
 **Excel 校验失败**
 
-优先检查：工作表是否齐全、主表是否恰好 `A1:K1` 合并、表头是否为 11 列固定顺序、是否冻结 `A3`、筛选范围是否正确、是否存在公式、`生成说明` 的 `用例数量` 是否与实际行数一致、追溯表是否至少 1 行数据。
+优先检查：工作表是否齐全、主表是否恰好 `A1:K1` 合并、主表 `A1` 标题是否为 `测试用例 - {日期} - [{需求名称}]` 且日期与需求名称和 `生成说明` 一致、表头是否为 11 列固定顺序、是否冻结 `A3`、筛选范围是否正确、是否存在公式、`生成说明` 的 `用例数量` 是否与实际行数一致、追溯表是否至少 1 行数据。
 
 **写入时提示文件被占用**
 

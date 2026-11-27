@@ -375,6 +375,44 @@
         "各上游入口在主场景中均有覆盖，同构下游分支用典型入口验证。",
         "每条用例只验证单一逻辑，不把多种不同触发条件的工单塞进一条用例。"
       ]
+    },
+    {
+      "id": "bidirectional-traceability-partial-table-and-unobservable-prd",
+      "prompt": "根据以下需求生成 Markdown 测试用例，上线日期 2026-12-01：需求第 1 条要求将主表 `t_main` 与历史表 `t_his` 的 `status` 字段由 1 位扩展为 2 位。后续接口说明与页面说明只描述读写 `t_main` 的 `status`，全文未提 `t_his` 何时写入或归档。另对后台批处理进程描述为“若记录已存在，则接口返回‘重复数据’”。",
+      "expected_output": "`t_his` 无下文使用方：拆出独立 `待确认`（问写入/归档时机与校验方式），不得挂在 `t_main` 用例下伪标 `已覆盖`，也不得编造归档规则。后台批处理“接口返回”属不可观测笔误：记 `待确认` 核对日志、状态表或告警，不照抄为确定预期。同时双向核对每条 `已覆盖` 条目涉及的表、字段、动作与分支均有对应断言。",
+      "files": [],
+      "expectations": [
+        "`t_his` 无下文使用方时拆出独立 `待确认` 条目，询问写入/归档时机与校验方式。",
+        "不把 `t_his` 挂在 `t_main` 用例下伪标 `已覆盖`，也不编造归档写入规则。",
+        "识别后台批处理“接口返回‘重复数据’”为不可观测笔误，记 `待确认` 核对日志、状态表或告警。",
+        "每条 `已覆盖` 条目涉及的表、字段、动作与分支均有对应断言，无悬空断言。"
+      ]
+    },
+    {
+      "id": "route-precondition-enum-vs-boundary-and-zero-hit-combination",
+      "prompt": "根据以下需求生成 Markdown 与 Excel 测试用例，上线日期 2026-12-02：查询接口在 `bizMode=0` 时校验必传参数（`orderNo` 必填），并按 `channelFlag` 路由，`channelFlag` 仅允许 `0`（呼入）或 `1`（呼出）。页面提交区含“总项（涉诈/不涉诈）+ 多个明细分项（可勾选涉诈）”，规则为“无论总项如何，只要任一分项勾选涉诈即触发关停”；改造同时要求详情页保留既有 3 列结构不变。",
+      "expected_output": "`bizMode` 留空属路由前提失效：归入通用入参契约或记 `待确认`，不得机械套用 `bizMode=0` 分支内规则做确定断言。`channelFlag` 的 `0/1` 为离散枚举，用等价类划分，Excel 设计方法列标 `等价类划分`，不套边界值离点。判定表须覆盖零命中边界（全部分项均未勾选涉诈且总项为涉诈 → 不关停），并对详情页既有 3 列结构给出独立回归断言。",
+      "files": [],
+      "expectations": [
+        "`bizMode` 留空时不机械套用 `bizMode=0` 分支内规则，归入通用入参契约或记 `待确认`。",
+        "Excel 设计方法列对 `channelFlag` 的 `0/1` 标 `等价类划分`，不标 `边界值分析` 或写离点。",
+        "覆盖零命中边界：全部分项均未勾选涉诈且总项为涉诈时，不触发关停。",
+        "详情页既有 3 列结构有独立回归断言。"
+      ]
+    },
+    {
+      "id": "post-render-inspect-merged-cleanup-and-assumption-confirmation",
+      "prompt": "工作目录存在 `TCD` 目录。请根据需求生成 Markdown 与 Excel 用例，上线日期 2026-12-03。首轮产物含 2 项待确认。随后用户回复：第 1 项确认维持原有业务级假设（不补充状态码）；第 2 项确认删除该作废分支，双格式重渲染。",
+      "expected_output": "目录存在性用 `test -d TCD` 或 `Path(\"TCD\").is_dir()` 判断。自检后直接运行 `render_cases.py`，不前置 `case_baseline.py check --draft`，渲染时不加 `--cleanup-baseline`；渲染成功后用 `inspect --merged --ids ... --trace-ids ...` 联合抽查，不裸写 `python -c`；确认无待确认、无后续变更且抽查闭环后才执行 `cleanup --baseline`。第 1 项仅维持既有业务假设，不新建冗余复合 `用户补充确认` 条目；删除作废分支的删减依据在汇报与 `meta.notes` 留痕（Excel `生成说明` 可见）。",
+      "files": [],
+      "expectations": [
+        "用 `test -d TCD` 或 `Path(\"TCD\").is_dir()` 判断目录存在性，不用 `ls` 管线。",
+        "直接运行 `render_cases.py`，不前置多余的 `check --draft`，渲染时不提前 `--cleanup-baseline`。",
+        "渲染后用 `inspect --merged --ids ... --trace-ids ...` 抽查，不裸写 `python -c` 读取产物。",
+        "抽查闭环且无待确认、无后续变更后才执行 `cleanup --baseline`。",
+        "仅维持原有业务级假设时不新建冗余复合 `用户补充确认` 条目。",
+        "删除作废分支的删减依据在汇报与 `meta.notes` 留痕，可在 Excel `生成说明` 与 `inspect --merged` 中查到。"
+      ]
     }
   ]
 }

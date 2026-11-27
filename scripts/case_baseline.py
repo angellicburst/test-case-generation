@@ -588,26 +588,37 @@ def canonical_tree_order(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+PLACEHOLDER_ITEM_WORDS = {"无", "无。", "暂无", "n/a", "none"}
+
+
 def collect_structure_warnings(cases: Any) -> list[str]:
-    """Return non-blocking warnings for redundant tree levels (module == group)."""
+    """Return non-blocking warnings for redundant tree levels and placeholders."""
     warnings: list[str] = []
     seen: set[tuple[str, str]] = set()
     if not isinstance(cases, (list, tuple)):
         return warnings
-    for case in cases:
+    placeholder_cases: dict[str, list[str]] = {"post_operations": [], "test_data": []}
+    for index, case in enumerate(cases, start=1):
         if not isinstance(case, dict):
             continue
         module = _text(case.get("module"))
         group = _text(case.get("group"))
-        if not group or group != module:
+        if group and group == module and (module, group) not in seen:
+            seen.add((module, group))
+            warnings.append(
+                f"模块“{module}”下存在同名分组“{group}”，"
+                "无子分组时建议留空 group 避免冗余层级。"
+            )
+        for field in placeholder_cases:
+            items = normalize_list_items(case.get(field))
+            if len(items) == 1 and items[0].strip().lower() in PLACEHOLDER_ITEM_WORDS:
+                placeholder_cases[field].append(_text(case.get("id")) or f"(第 {index} 条)")
+    for field, case_ids in placeholder_cases.items():
+        if not case_ids:
             continue
-        key = (module, group)
-        if key in seen:
-            continue
-        seen.add(key)
         warnings.append(
-            f"模块“{module}”下存在同名分组“{group}”，"
-            "无子分组时建议留空 group 避免冗余层级。"
+            f"以下用例的 {field} 仅填“无”类占位词（共 {len(case_ids)} 条："
+            f"{'、'.join(case_ids)}），无动作时建议留空数组 [] 省略该节点。"
         )
     return warnings
 
@@ -1529,6 +1540,68 @@ def _format_id_list(case_ids: list[str]) -> str:
     return f"{head} … {tail}（共 {len(case_ids)} 条）"
 
 
+def _pending_summary_line(entry: dict[str, Any]) -> str:
+    return (
+        f"待确认 {entry.get('id', '')}"
+        f"（{entry.get('source', '')}｜{entry.get('location', '')}）："
+        f"未明确={entry.get('issue', '')}｜"
+        f"假设={entry.get('assumption', '')}｜"
+        f"问题={entry.get('question', '')}"
+    )
+
+
+def _case_detail_lines(
+    case: dict[str, Any],
+    case_id: str,
+    design_method: str,
+    design_method_hint: str,
+) -> list[str]:
+    lines = [f"--- {case_id} ---"]
+    lines.append(f"标题：{case.get('title', '')}")
+    lines.append(
+        f"类型：{case.get('type', '')}；设计方法：{design_method or design_method_hint}"
+    )
+    lines.append(f"优先级：{case.get('priority', '')}")
+    raw_refs = case.get("traceability_refs")
+    refs = (
+        [str(ref) for ref in raw_refs if ref is not None]
+        if isinstance(raw_refs, (list, tuple))
+        else []
+    )
+    lines.append("追溯引用：" + ("、".join(refs) or "（无）"))
+    for label, key in (
+        ("前置操作", "pre_operations"),
+        ("测试数据", "test_data"),
+        ("测试步骤", "steps"),
+        ("预期结果", "expected_results"),
+        ("后置操作", "post_operations"),
+    ):
+        items = case.get(key) or []
+        lines.append(f"{label}：" + ("；".join(items) if items else "（空）"))
+    return lines
+
+
+def _trace_detail_lines(entry: dict[str, Any], trace_id: str) -> list[str]:
+    lines = [f"--- {trace_id} ---"]
+    lines.append(f"状态：{entry.get('status', '')}")
+    lines.append(f"来源：{entry.get('source', '')}")
+    lines.append(f"定位：{entry.get('location', '')}")
+    if entry.get("status") == "待确认":
+        lines.append(f"未明确项：{entry.get('issue', '')}")
+        lines.append(f"当前测试假设：{entry.get('assumption', '')}")
+        lines.append(f"确认问题：{entry.get('question', '')}")
+    else:
+        lines.append(f"规则：{entry.get('rule', '')}")
+        raw_case_ids = entry.get("case_ids")
+        case_ids = (
+            [_text(item) for item in raw_case_ids if _text(item)]
+            if isinstance(raw_case_ids, (list, tuple))
+            else []
+        )
+        lines.append("关联用例：" + ("、".join(case_ids) if case_ids else "（无）"))
+    return lines
+
+
 def _inspect_summary(
     ir: dict[str, Any],
     source: str,
@@ -1548,6 +1621,10 @@ def _inspect_summary(
         lines.append("覆盖范围：Markdown 不含覆盖范围字段（以 Excel 生成说明为准）")
     else:
         lines.append(f"覆盖范围：{meta.get('coverage') or '（空）'}")
+    if source == "Markdown" and not meta.get("notes"):
+        lines.append("补充说明：Markdown 不含补充说明字段（以 Excel 生成说明为准）")
+    else:
+        lines.append(f"补充说明：{meta.get('notes') or '（空）'}")
     lines.append(f"用例总数：{len(cases)}")
     lines.append(f"用例 ID：{_format_id_list([case.get('id', '') for case in cases])}")
 
@@ -1570,8 +1647,13 @@ def _inspect_summary(
     lines.append(f"已覆盖追溯：{len(covered)} 条；待确认：{len(pending)} 条")
     if pending:
         for entry in pending:
-            lines.append(f"待确认 {entry.get('id', '')}：{entry.get('question', '')}")
+            lines.append(_pending_summary_line(entry))
 
+    hint = (
+        "Markdown 不含设计方法（以 Excel 为准）"
+        if source == "Markdown"
+        else "（空）"
+    )
     if ids:
         by_id = {case.get("id", ""): case for case in cases}
         for wanted in ids:
@@ -1579,26 +1661,9 @@ def _inspect_summary(
             if case is None:
                 lines.append(f"未找到用例: {wanted}")
                 continue
-            lines.append(f"--- {wanted} ---")
-            lines.append(f"标题：{case.get('title', '')}")
-            lines.append(f"类型：{case.get('type', '')}；设计方法：{case.get('design_method') or '（空）'}")
-            lines.append(f"优先级：{case.get('priority', '')}")
-            raw_refs = case.get("traceability_refs")
-            refs = (
-                [str(ref) for ref in raw_refs if ref is not None]
-                if isinstance(raw_refs, (list, tuple))
-                else []
+            lines.extend(
+                _case_detail_lines(case, wanted, case.get("design_method") or "", hint)
             )
-            lines.append("追溯引用：" + ("、".join(refs) or "（无）"))
-            for label, key in (
-                ("前置操作", "pre_operations"),
-                ("测试数据", "test_data"),
-                ("测试步骤", "steps"),
-                ("预期结果", "expected_results"),
-                ("后置操作", "post_operations"),
-            ):
-                items = case.get(key) or []
-                lines.append(f"{label}：" + ("；".join(items) if items else "（空）"))
 
     if trace_ids:
         entries_by_id = {_text(entry.get("id")): entry for entry in entries}
@@ -1607,23 +1672,180 @@ def _inspect_summary(
             if entry is None:
                 lines.append(f"未找到追溯条目: {wanted}")
                 continue
-            lines.append(f"--- {wanted} ---")
-            lines.append(f"状态：{entry.get('status', '')}")
-            lines.append(f"来源：{entry.get('source', '')}")
-            lines.append(f"定位：{entry.get('location', '')}")
-            if entry.get("status") == "待确认":
-                lines.append(f"未明确项：{entry.get('issue', '')}")
-                lines.append(f"当前测试假设：{entry.get('assumption', '')}")
-                lines.append(f"确认问题：{entry.get('question', '')}")
-            else:
-                lines.append(f"规则：{entry.get('rule', '')}")
-                raw_case_ids = entry.get("case_ids")
-                case_ids = (
-                    [_text(item) for item in raw_case_ids if _text(item)]
-                    if isinstance(raw_case_ids, (list, tuple))
-                    else []
+            lines.extend(_trace_detail_lines(entry, wanted))
+    return lines
+
+
+def _merged_sources(
+    artifacts: list[tuple[str, dict[str, Any]]],
+    sheetnames: list[str] | None,
+    ids: list[str],
+    trace_ids: list[str] | None,
+) -> list[str]:
+    """Merge several parsed artifacts into one summary (Markdown > Excel > IR)."""
+    priority = {"Markdown": 0, "Excel": 1, "Baseline IR": 2}
+    sources = sorted(artifacts, key=lambda item: priority.get(item[0], 99))
+    lines = ["=== 合并摘要（" + " + ".join(name for name, _ in sources) + "） ==="]
+    if sheetnames:
+        lines.append("工作表：" + "、".join(sheetnames))
+
+    def first_meta(key: str) -> str:
+        for _name, ir in sources:
+            value = (ir.get("meta") or {}).get(key)
+            if value:
+                return str(value)
+        return ""
+
+    lines.append(f"需求名称：{first_meta('requirement_name') or '（空）'}")
+    lines.append(f"上线日期：{first_meta('release_date') or '（空）'}")
+    lines.append(f"覆盖范围：{first_meta('coverage') or '（空）'}")
+    lines.append(f"补充说明：{first_meta('notes') or '（空）'}")
+
+    case_sources = [
+        (name, ir)
+        for name, ir in sources
+        if any(isinstance(case, dict) for case in ir.get("cases") or [])
+    ]
+    primary_name, primary_ir = case_sources[0] if case_sources else ("", {})
+    cases = [case for case in primary_ir.get("cases") or [] if isinstance(case, dict)]
+    lines.append(f"用例总数：{len(cases)}")
+    lines.append(f"用例 ID：{_format_id_list([case.get('id', '') for case in cases])}")
+
+    module_source: tuple[str, Counter] | None = None
+    for name, ir in sources:
+        modules = Counter(
+            case.get("module", "")
+            for case in ir.get("cases") or []
+            if isinstance(case, dict)
+        )
+        if not modules:
+            continue
+        if name == "Excel" and not any(modules):
+            continue
+        module_source = (name, modules)
+        break
+    if module_source is None:
+        module_source = (
+            primary_name,
+            Counter(case.get("module", "") for case in cases),
+        )
+    if (
+        module_source[0] == "Excel"
+        and module_source[1]
+        and not any(module_source[1])
+    ):
+        lines.append("按模块：Excel 不含模块列（未统计）")
+    else:
+        lines.append(
+            "按模块："
+            + (
+                "、".join(
+                    f"{name or '（未标注）'}({count})"
+                    for name, count in module_source[1].items()
                 )
-                lines.append("关联用例：" + ("、".join(case_ids) if case_ids else "（无）"))
+                or "（无）"
+            )
+        )
+    types = Counter(case.get("type", "") for case in cases)
+    lines.append(
+        "按类型："
+        + ("、".join(f"{name or '（未标注）'}({count})" for name, count in types.items()) or "（无）")
+    )
+
+    entry_source: tuple[str, list[dict[str, Any]]] | None = None
+    for name, ir in sources:
+        entries = [
+            entry
+            for entry in ir.get("traceability") or []
+            if isinstance(entry, dict)
+        ]
+        if entries:
+            entry_source = (name, entries)
+            break
+    if entry_source is None:
+        entry_source = (primary_name, [])
+    entries = entry_source[1]
+    covered = [entry for entry in entries if entry.get("status") == "已覆盖"]
+    pending = [entry for entry in entries if entry.get("status") == "待确认"]
+    lines.append(f"已覆盖追溯：{len(covered)} 条；待确认：{len(pending)} 条")
+    for entry in pending:
+        lines.append(_pending_summary_line(entry))
+
+    def signatures(ir: dict[str, Any]) -> dict[str, Any]:
+        ir_cases = [
+            case for case in ir.get("cases") or [] if isinstance(case, dict)
+        ]
+        ir_entries = [
+            entry
+            for entry in ir.get("traceability") or []
+            if isinstance(entry, dict)
+        ]
+        meta = ir.get("meta") or {}
+        return {
+            "需求名称": meta.get("requirement_name") or "",
+            "上线日期": meta.get("release_date") or "",
+            "用例总数": len(ir_cases),
+            "用例 ID": sorted(str(case.get("id", "")) for case in ir_cases),
+            "已覆盖追溯数": len(
+                [entry for entry in ir_entries if entry.get("status") == "已覆盖"]
+            ),
+            "待确认数": len(
+                [entry for entry in ir_entries if entry.get("status") == "待确认"]
+            ),
+        }
+
+    per_source = [signatures(ir) for _name, ir in sources]
+    base = per_source[0]
+    differing = [
+        field
+        for field in base
+        if any(other[field] != base[field] for other in per_source[1:])
+    ]
+    if differing:
+        lines.append("警告：跨源摘要不一致（" + "、".join(differing) + "）。")
+
+    design_methods: dict[str, str] = {}
+    for _name, ir in sources:
+        for case in ir.get("cases") or []:
+            if not isinstance(case, dict):
+                continue
+            case_id = _text(case.get("id"))
+            if case_id and not design_methods.get(case_id):
+                design_methods[case_id] = _text(case.get("design_method"))
+
+    if ids:
+        for wanted in ids:
+            case: dict[str, Any] | None = None
+            for _name, ir in sources:
+                for candidate in ir.get("cases") or []:
+                    if isinstance(candidate, dict) and candidate.get("id") == wanted:
+                        case = candidate
+                        break
+                if case is not None:
+                    break
+            if case is None:
+                lines.append(f"未找到用例: {wanted}")
+                continue
+            lines.extend(
+                _case_detail_lines(
+                    case, wanted, design_methods.get(wanted, ""), "（空）"
+                )
+            )
+
+    if trace_ids:
+        for wanted in trace_ids:
+            entry: dict[str, Any] | None = None
+            for _name, ir in sources:
+                for candidate in ir.get("traceability") or []:
+                    if isinstance(candidate, dict) and _text(candidate.get("id")) == wanted:
+                        entry = candidate
+                        break
+                if entry is not None:
+                    break
+            if entry is None:
+                lines.append(f"未找到追溯条目: {wanted}")
+                continue
+            lines.extend(_trace_detail_lines(entry, wanted))
     return lines
 
 
@@ -1634,6 +1856,7 @@ def inspect_artifacts(
     sheet_name: str = "测试用例",
     ids: list[str] | None = None,
     trace_ids: list[str] | None = None,
+    merged: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Build a read-only summary of Markdown / Excel / IR artifacts."""
     if markdown_path is None and excel_path is None and baseline_path is None:
@@ -1643,6 +1866,8 @@ def inspect_artifacts(
     errors: list[str] = []
     wanted = [value for value in (ids or []) if value]
     wanted_traces = [value for value in (trace_ids or []) if value]
+    artifacts: list[tuple[str, dict[str, Any]]] = []
+    sheetnames: list[str] | None = None
 
     if baseline_path is not None:
         try:
@@ -1650,16 +1875,20 @@ def inspect_artifacts(
         except ValueError as exc:
             errors.append(str(exc))
         else:
-            lines.extend(_inspect_summary(ir, "Baseline IR", wanted, wanted_traces))
-            lines.append("")
+            artifacts.append(("Baseline IR", ir))
+            if not merged:
+                lines.extend(_inspect_summary(ir, "Baseline IR", wanted, wanted_traces))
+                lines.append("")
 
     if markdown_path is not None:
         ir, md_errors, _ = parse_markdown_to_ir(markdown_path, strict_count=False)
         if md_errors:
             errors.extend(f"Markdown: {message}" for message in md_errors)
         else:
-            lines.extend(_inspect_summary(ir, "Markdown", wanted, wanted_traces))
-            lines.append("")
+            artifacts.append(("Markdown", ir))
+            if not merged:
+                lines.extend(_inspect_summary(ir, "Markdown", wanted, wanted_traces))
+                lines.append("")
 
     if excel_path is not None:
         ir, excel_errors, _ = parse_excel_to_ir(excel_path, sheet_name=sheet_name)
@@ -1670,16 +1899,59 @@ def inspect_artifacts(
 
             workbook = openpyxl.load_workbook(excel_path, read_only=True)
             try:
-                sheet_lines = _inspect_summary(ir, "Excel", wanted, wanted_traces)
-                sheet_lines.insert(1, "工作表：" + "、".join(workbook.sheetnames))
+                sheetnames = list(workbook.sheetnames)
             finally:
                 workbook.close()
-            lines.extend(sheet_lines)
-            lines.append("")
+            artifacts.append(("Excel", ir))
+            if not merged:
+                sheet_lines = _inspect_summary(ir, "Excel", wanted, wanted_traces)
+                sheet_lines.insert(1, "工作表：" + "、".join(sheetnames))
+                lines.extend(sheet_lines)
+                lines.append("")
+
+    if merged:
+        if len(artifacts) >= 2:
+            lines.extend(_merged_sources(artifacts, sheetnames, wanted, wanted_traces))
+        elif artifacts:
+            name, ir = artifacts[0]
+            merged_lines = _inspect_summary(ir, name, wanted, wanted_traces)
+            if sheetnames:
+                merged_lines.insert(1, "工作表：" + "、".join(sheetnames))
+            lines.extend(merged_lines)
 
     while lines and not lines[-1]:
         lines.pop()
     return lines, errors
+
+
+def _cleanup_baseline(baseline: str) -> int:
+    """Delete a temporary IR only after proving it is a test-case IR file."""
+    path = Path(baseline).expanduser()
+    if path.is_dir() or path.suffix.lower() != ".json":
+        print(f"拒绝清理非 JSON 文件：{path}", file=sys.stderr)
+        return 1
+    if not path.exists():
+        print(f"临时 IR 不存在，无需清理：{path}")
+        return 0
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        print(f"拒绝清理非测试 IR 文件：{path}（{exc}）", file=sys.stderr)
+        return 1
+    is_ir = isinstance(payload, dict) and (
+        "schema_version" in payload
+        or ("cases" in payload and "traceability" in payload)
+    )
+    if not is_ir:
+        print(f"拒绝清理非测试 IR 文件：{path}", file=sys.stderr)
+        return 1
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"清理失败：{path}（{exc}）", file=sys.stderr)
+        return 1
+    print(f"已清理临时 IR：{path}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1723,6 +1995,14 @@ def main(argv: list[str] | None = None) -> int:
     inspect.add_argument("--sheet-name", default="测试用例")
     inspect.add_argument("--ids", help="逗号分隔的用例 ID，打印明细")
     inspect.add_argument("--trace-ids", help="逗号分隔的追溯 ID，打印条目明细")
+    inspect.add_argument(
+        "--merged",
+        action="store_true",
+        help="多源合并为单一摘要（Markdown > Excel > Baseline IR）",
+    )
+
+    cleanup = subparsers.add_parser("cleanup", help="安全清理临时 IR 文件")
+    cleanup.add_argument("--baseline", required=True, help="待清理的临时 IR JSON 路径")
 
     args = parser.parse_args(argv)
     if args.command == "check" and args.assign_ids and not args.draft:
@@ -1739,6 +2019,7 @@ def main(argv: list[str] | None = None) -> int:
                 sheet_name=args.sheet_name,
                 ids=[value for value in ids if value],
                 trace_ids=[value for value in trace_ids if value],
+                merged=args.merged,
             )
             for line in lines:
                 print(line)
@@ -1838,6 +2119,9 @@ def main(argv: list[str] | None = None) -> int:
             _write_ir(Path(args.baseline).expanduser().resolve(), ir, force=True)
             print(f"已重排 {len(mapping)} 条用例 ID。")
             return 0
+
+        if args.command == "cleanup":
+            return _cleanup_baseline(args.baseline)
     except (ValueError, FileLockedError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
