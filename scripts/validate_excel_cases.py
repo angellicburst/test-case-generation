@@ -12,6 +12,7 @@ from typing import Any
 from case_baseline import (
     INFO_LABELS,
     RESERVED_SHEET_NAMES,
+    TITLE_PATTERN,
     V2_HEADERS,
     parse_excel_to_ir,
     validate_baseline,
@@ -145,6 +146,41 @@ def validate_info_sheet(workbook: Any, expected_count: int) -> list[str]:
     return errors
 
 
+def _info_values(workbook: Any) -> dict[str, str]:
+    if "生成说明" not in workbook.sheetnames:
+        return {}
+    info = workbook["生成说明"]
+    values: dict[str, str] = {}
+    for row in range(2, (info.max_row or 0) + 1):
+        label = _cell_text(info.cell(row=row, column=1).value)
+        if label in INFO_LABELS and label not in values:
+            values[label] = _cell_text(info.cell(row=row, column=2).value)
+    return values
+
+
+def _title_errors(workbook: Any, sheet: Any) -> list[str]:
+    title = _cell_text(sheet["A1"].value)
+    if not title:
+        return []
+    match = TITLE_PATTERN.match(title)
+    if not match:
+        return ["主工作表 A1 标题必须为“测试用例 - {日期} - [{需求名称}]”格式。"]
+    errors: list[str] = []
+    date_text, name_text = match.group(1).strip(), match.group(2).strip()
+    if not is_valid_date_or_placeholder(date_text):
+        errors.append("主工作表 A1 标题中的日期必须为有效 YYYY-MM-DD 或 未指定日期。")
+    info = _info_values(workbook)
+    if info.get("上线日期") and info["上线日期"] != date_text:
+        errors.append(
+            f"主工作表 A1 标题中的上线日期“{date_text}”与生成说明“{info['上线日期']}”不一致。"
+        )
+    if info.get("需求名称") and info["需求名称"] != name_text:
+        errors.append(
+            f"主工作表 A1 标题中的需求名称“{name_text}”与生成说明“{info['需求名称']}”不一致。"
+        )
+    return errors
+
+
 def validate_excel_file(file_path: Path, sheet_name: str = "测试用例") -> list[str]:
     """Validate one workbook without any external traceability matrix."""
     errors: list[str] = []
@@ -174,6 +210,8 @@ def validate_excel_file(file_path: Path, sheet_name: str = "测试用例") -> li
     sheet = workbook[sheet_name]
     if not _cell_text(sheet["A1"].value):
         errors.append("主工作表 A1 标题不能为空。")
+    else:
+        errors.extend(_title_errors(workbook, sheet))
     _sheet_layout_errors(sheet, len(V2_HEADERS), "A1:K1", errors, "主工作表")
 
     has_pending_sheet = "待确认项" in workbook.sheetnames

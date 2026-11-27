@@ -2406,6 +2406,7 @@ class ExcelV2RenderTests(unittest.TestCase):
             }
         )
         ir["meta"]["requirement_name"] = "=1+1"
+        ir["meta"].pop("title", None)
         ir["meta"]["coverage"] = "=1+1"
         ir["meta"]["notes"] = "+1+1"
         ir["traceability"][1].update(
@@ -2960,6 +2961,156 @@ class StructureWarningTests(unittest.TestCase):
             _, sync_errors, warnings = prepare_sync_ir(markdown)
         self.assertEqual(sync_errors, [])
         self.assertTrue(any("同名分组" in warning for warning in warnings), warnings)
+
+    def test_placeholder_only_arrays_warn_without_blocking(self):
+        cases = [
+            {"id": "TC-ZC-001", "module": "甲", "post_operations": ["无"]},
+            {"id": "TC-ZC-002", "module": "甲", "post_operations": [" 暂无 "]},
+            {"id": "TC-ZC-003", "module": "甲", "test_data": ["N/A"]},
+            {"id": "TC-ZC-004", "module": "甲", "test_data": ["@SUM(1)"]},
+            {"id": "TC-ZC-005", "module": "甲", "test_data": ["无", "另一个值"]},
+            {"id": "", "module": "甲", "post_operations": ["None"]},
+        ]
+        warnings = collect_structure_warnings(cases)
+        self.assertEqual(len(warnings), 2, warnings)
+        self.assertIn(
+            "以下用例的 post_operations 仅填“无”类占位词（共 3 条：TC-ZC-001、TC-ZC-002、(第 6 条)）",
+            warnings[0],
+        )
+        self.assertIn("test_data 仅填“无”类占位词（共 1 条：TC-ZC-003）", warnings[1])
+
+    def test_placeholder_warning_surfaces_from_prepare_render_ir(self):
+        ir = valid_ir()
+        ir["cases"][0]["post_operations"] = ["无"]
+        settled, errors, warnings = prepare_render_ir(ir)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(settled["cases"]), 1)
+        self.assertTrue(
+            any("post_operations" in warning and "[]" in warning for warning in warnings),
+            warnings,
+        )
+
+    def test_placeholder_warning_surfaces_from_prepare_sync_ir(self):
+        ir = valid_ir()
+        ir["cases"][0]["post_operations"] = ["无"]
+        settled, errors, _ = prepare_render_ir(ir)
+        self.assertEqual(errors, [])
+        with tempfile.TemporaryDirectory() as directory:
+            markdown = Path(directory) / "cases.md"
+            markdown.write_text(render_markdown(settled), encoding="utf-8")
+            _, sync_errors, warnings = prepare_sync_ir(markdown)
+        self.assertEqual(sync_errors, [])
+        self.assertTrue(
+            any("post_operations" in warning and "[]" in warning for warning in warnings),
+            warnings,
+        )
+
+
+class CleanupCommandTests(unittest.TestCase):
+    """Scenario 3: cleanup runs only after inspect, and never eats deliverables."""
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "case_baseline.py"), *args],
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            env=subprocess_env(),
+        )
+
+    def test_cleanup_removes_valid_ir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ir.json"
+            path.write_text(json.dumps(valid_ir(), ensure_ascii=False), encoding="utf-8")
+            result = self._run("cleanup", "--baseline", str(path))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("已清理临时 IR", result.stdout)
+            self.assertFalse(path.exists())
+
+    def test_cleanup_accepts_utf8_bom_ir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ir.json"
+            path.write_text(json.dumps(valid_ir(), ensure_ascii=False), encoding="utf-8-sig")
+            result = self._run("cleanup", "--baseline", str(path))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("已清理临时 IR", result.stdout)
+            self.assertFalse(path.exists())
+
+    def test_cleanup_is_idempotent_when_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ir.json"
+            result = self._run("cleanup", "--baseline", str(path))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("不存在，无需清理", result.stdout)
+
+    def test_cleanup_refuses_non_ir_targets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown = directory_path / "cases.md"
+            markdown.write_text("# 测试用例", encoding="utf-8")
+            excel = directory_path / "cases.xlsx"
+            save_workbook_atomic(build_workbook_from_ir(valid_ir()), excel)
+            other_json = directory_path / "other.json"
+            other_json.write_text('{"a": 1}', encoding="utf-8")
+            broken_json = directory_path / "broken.json"
+            broken_json.write_text("not json", encoding="utf-8")
+            for target in (markdown, excel, other_json, broken_json, directory_path):
+                with self.subTest(target=target.name):
+                    result = self._run("cleanup", "--baseline", str(target))
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn("拒绝清理", result.stderr)
+                    self.assertTrue(target.exists())
+
+
+class ExcelTitleConsistencyTests(unittest.TestCase):
+    """Scenario 4: the workbook title must agree with 生成说明."""
+
+    def _assert_error(self, mutate, expected: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.xlsx"
+            save_workbook_atomic(build_workbook_from_ir(valid_ir()), path)
+            workbook = load_workbook(path)
+            mutate(workbook)
+            workbook.save(path)
+            errors = validate_excel_file(path)
+        self.assertTrue(any(expected in error for error in errors), errors)
+
+    def test_bad_title_format_is_rejected(self):
+        self._assert_error(
+            lambda workbook: workbook["测试用例"].__setitem__("A1", "注册用例"),
+            "主工作表 A1 标题必须为",
+        )
+
+    def test_invalid_title_date_is_rejected(self):
+        self._assert_error(
+            lambda workbook: workbook["测试用例"].__setitem__(
+                "A1", "测试用例 - 2026-02-30 - [注册]"
+            ),
+            "标题中的日期必须为有效",
+        )
+
+    def test_title_and_info_mismatch_are_rejected(self):
+        self._assert_error(
+            lambda workbook: workbook["测试用例"].__setitem__(
+                "A1", "测试用例 - 2026-11-25 - [注册]"
+            ),
+            "上线日期“2026-11-25”与生成说明“2026-11-24”不一致",
+        )
+        self._assert_error(
+            lambda workbook: workbook["测试用例"].__setitem__(
+                "A1", "测试用例 - 2026-11-24 - [登录]"
+            ),
+            "需求名称“登录”与生成说明“注册”不一致",
+        )
+
+    def test_placeholder_date_title_is_allowed(self):
+        ir = valid_ir()
+        ir["meta"]["release_date"] = "未指定日期"
+        ir["meta"].pop("title")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.xlsx"
+            save_workbook_atomic(build_workbook_from_ir(ir), path)
+            self.assertEqual(validate_excel_file(path), [])
 
 
 class ZeroLeakGuardTests(unittest.TestCase):
@@ -3548,6 +3699,192 @@ class InspectSummaryTests(unittest.TestCase):
         )
         self.assertNotIn("覆盖范围：（空）", lines)
 
+    def test_summary_reports_notes_and_full_pending_quadruple(self):
+        ir = pending_ir()
+        ir["meta"]["notes"] = "第一行\n第二行"
+        lines = case_baseline._inspect_summary(ir, "Baseline IR", [])
+        self.assertIn("补充说明：第一行\n第二行", lines)
+        self.assertIn(
+            "待确认 TRACE-REG-Q01（注册需求.md｜1.2 超时）："
+            "未明确=超时行为未定义｜假设=暂按失败处理｜问题=超时是否重试？",
+            lines,
+        )
+
+    def test_summary_notes_fallback_per_source(self):
+        ir = pending_ir()
+        ir["meta"]["notes"] = ""
+        self.assertIn("补充说明：（空）", case_baseline._inspect_summary(ir, "Excel", []))
+        self.assertIn(
+            "补充说明：Markdown 不含补充说明字段（以 Excel 生成说明为准）",
+            case_baseline._inspect_summary(ir, "Markdown", []),
+        )
+
+    def test_markdown_design_method_hint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            markdown, _ = self._render(Path(directory), valid_ir())
+            lines, errors = inspect_artifacts(markdown_path=markdown, ids=["TC-ZC-001"])
+        self.assertEqual(errors, [])
+        self.assertIn("类型：功能测试；设计方法：Markdown 不含设计方法（以 Excel 为准）", lines)
+        self.assertNotIn("设计方法：（空）", lines)
+
+    def test_merged_three_sources_single_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown, excel = self._render(directory_path, pending_ir())
+            baseline = directory_path / "ir.json"
+            lines, errors = inspect_artifacts(
+                markdown_path=markdown,
+                excel_path=excel,
+                baseline_path=baseline,
+                ids=["TC-ZC-001"],
+                trace_ids=["TRACE-REG-001"],
+                merged=True,
+            )
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            [line for line in lines if line.startswith("=== ")],
+            ["=== 合并摘要（Markdown + Excel + Baseline IR） ==="],
+        )
+        self.assertIn("工作表：测试用例、生成说明、需求追溯、待确认项", lines)
+        self.assertIn("覆盖范围：覆盖注册主流程", lines)
+        self.assertIn("补充说明：基于需求文档生成", lines)
+        self.assertIn("按模块：注册模块(1)", lines)
+        self.assertIn("类型：功能测试；设计方法：等价类划分", lines)
+        self.assertEqual(lines.count("--- TC-ZC-001 ---"), 1)
+        self.assertEqual(lines.count("--- TRACE-REG-001 ---"), 1)
+        self.assertFalse(any("警告：" in line for line in lines))
+
+    def test_merged_excel_without_module_prefix_falls_back_to_ir(self):
+        ir = valid_ir()
+        ir["cases"][0]["title"] = "合法手机号注册成功"
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            _, excel = self._render(directory_path, ir)
+            baseline = directory_path / "ir.json"
+            lines, errors = inspect_artifacts(
+                excel_path=excel, baseline_path=baseline, merged=True
+            )
+        self.assertEqual(errors, [])
+        self.assertEqual(lines[0], "=== 合并摘要（Excel + Baseline IR） ===")
+        self.assertIn("按模块：注册模块(1)", lines)
+
+    def test_merged_warns_on_cross_source_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown, _ = self._render(directory_path, valid_ir())
+            baseline = directory_path / "ir.json"
+            other = valid_ir()
+            other["meta"]["requirement_name"] = "注册二"
+            other["meta"].pop("title")
+            baseline.write_text(json.dumps(other, ensure_ascii=False), encoding="utf-8")
+            lines, errors = inspect_artifacts(
+                markdown_path=markdown, baseline_path=baseline, merged=True
+            )
+        self.assertEqual(errors, [])
+        self.assertTrue(
+            any(
+                line.startswith("警告：跨源摘要不一致（") and "需求名称" in line
+                for line in lines
+            ),
+            lines,
+        )
+
+    def test_merged_single_source_degrades_to_plain_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            markdown, _ = self._render(Path(directory), valid_ir())
+            lines, errors = inspect_artifacts(markdown_path=markdown, merged=True)
+        self.assertEqual(errors, [])
+        self.assertEqual(lines[0], "=== Markdown ===")
+
+    def test_merged_markdown_excel_fills_missing_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown, excel = self._render(directory_path, pending_ir())
+            lines, errors = inspect_artifacts(
+                markdown_path=markdown,
+                excel_path=excel,
+                ids=["TC-ZC-001"],
+                merged=True,
+            )
+        self.assertEqual(errors, [])
+        self.assertEqual(lines[0], "=== 合并摘要（Markdown + Excel） ===")
+        self.assertIn("工作表：测试用例、生成说明、需求追溯、待确认项", lines)
+        self.assertIn("覆盖范围：覆盖注册主流程", lines)
+        self.assertIn("补充说明：基于需求文档生成", lines)
+        self.assertIn("类型：功能测试；设计方法：等价类划分", lines)
+
+    def test_merged_markdown_ir_uses_ir_meta_and_design_method(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown, _ = self._render(directory_path, valid_ir())
+            baseline = directory_path / "ir.json"
+            lines, errors = inspect_artifacts(
+                markdown_path=markdown,
+                baseline_path=baseline,
+                ids=["TC-ZC-001"],
+                merged=True,
+            )
+        self.assertEqual(errors, [])
+        self.assertEqual(lines[0], "=== 合并摘要（Markdown + Baseline IR） ===")
+        self.assertIn("补充说明：基于需求文档生成", lines)
+        self.assertIn("类型：功能测试；设计方法：等价类划分", lines)
+        self.assertFalse(any(line.startswith("工作表：") for line in lines))
+
+    def test_merged_excel_with_module_prefix_prefers_excel(self):
+        ir = valid_ir()
+        ir["cases"][0]["module"] = "IR模块"
+        ir["cases"][0]["title"] = "[Excel模块]_[注册]_[合法手机号]_[成功]"
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            _, excel = self._render(directory_path, ir)
+            baseline = directory_path / "ir.json"
+            lines, errors = inspect_artifacts(
+                excel_path=excel, baseline_path=baseline, merged=True
+            )
+        self.assertEqual(errors, [])
+        self.assertIn("按模块：Excel模块(1)", lines)
+
+    def test_merged_excel_without_prefix_and_empty_ir_reports_no_module_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            ir = valid_ir()
+            ir["cases"][0]["title"] = "合法手机号注册成功"
+            _, excel = self._render(directory_path, ir)
+            baseline = directory_path / "ir.json"
+            empty = valid_ir()
+            empty["cases"] = []
+            empty["traceability"] = []
+            baseline.write_text(json.dumps(empty, ensure_ascii=False), encoding="utf-8")
+            lines, errors = inspect_artifacts(
+                excel_path=excel, baseline_path=baseline, merged=True
+            )
+        self.assertEqual(errors, [])
+        self.assertIn("按模块：Excel 不含模块列（未统计）", lines)
+        self.assertTrue(any(line.startswith("警告：跨源摘要不一致（") for line in lines))
+
+    def test_merged_is_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            markdown, excel = self._render(directory_path, pending_ir())
+            baseline = directory_path / "ir.json"
+            before = {
+                path: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (markdown, excel, baseline)
+            }
+            inspect_artifacts(
+                markdown_path=markdown,
+                excel_path=excel,
+                baseline_path=baseline,
+                ids=["TC-ZC-001"],
+                trace_ids=["TRACE-REG-001"],
+                merged=True,
+            )
+            after = {
+                path: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (markdown, excel, baseline)
+            }
+        self.assertEqual(before, after)
+
     def test_trace_ids_expand_covered_pending_and_misses(self):
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
@@ -3701,6 +4038,18 @@ class OpenpyxlBlockedInspectTests(unittest.TestCase):
                         "TRACE-REG-001",
                     ),
                     "--- TRACE-REG-001 ---",
+                ),
+                (
+                    (
+                        script,
+                        "inspect",
+                        "--markdown",
+                        str(markdown),
+                        "--baseline",
+                        str(baseline),
+                        "--merged",
+                    ),
+                    "=== 合并摘要（Markdown + Baseline IR） ===",
                 ),
             ):
                 with self.subTest(expected=expected):
